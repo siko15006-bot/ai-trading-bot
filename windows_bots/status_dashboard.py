@@ -1296,7 +1296,7 @@ details.section>summary:active{background:var(--card2)}
 {% if not code %}{% set mt5.oracle = not acc.error %}{% endif %}
 {% endfor %}
 {% set mt5_all_ok = mt5.ea and mt5.em and mt5.ba %}
-{% set oracle_ok = mt5.oracle and oracle_meta and oracle_meta.bybit_shield_alive and oracle_meta.ladder_guard_alive and oracle_meta.tg_signal_bot_alive and oracle_meta.liquidity_sweep_alive %}
+{% set oracle_ok = mt5.oracle and oracle_meta and oracle_meta.bybit_shield_alive and oracle_meta.ladder_guard_alive and oracle_meta.tg_signal_bot_alive %}
 {% set bots_ok = bots|length > 0 %}
 {% set unprotected_ok = total_unprotected == 0 %}
 {% set alerts_ok = not alerts %}
@@ -1559,7 +1559,7 @@ details.section>summary:active{background:var(--card2)}
 <span class="chip">{{ '🟢' if oracle_meta.bybit_shield_alive else ('⚪' if oracle_meta.bybit_shield_alive is none else '🔴') }} bybit_shield (Oracle)</span>
 <span class="chip">{{ '🟢' if oracle_meta.ladder_guard_alive else ('⚪' if oracle_meta.ladder_guard_alive is none else '🔴') }} ladder_guard (Oracle)</span>
 <span class="chip">{{ '🟢' if oracle_meta.tg_signal_bot_alive else ('⚪' if oracle_meta.tg_signal_bot_alive is none else '🔴') }} tg_signal_bot (Oracle)</span>
-<span class="chip">{{ '🟢' if oracle_meta.liquidity_sweep_alive else ('⚪' if oracle_meta.liquidity_sweep_alive is none else '🔴') }} liquidity_sweep (Oracle)</span>
+<span class="chip">⚪ liquidity_sweep (Oracle stopped by design)</span>
 </div>
 {% endif %}
 <div class="footnote" style="padding:8px 0 0 0">Local process table only — Oracle bots shown above as simple alive/dead chips (their own read-only API doesn't expose per-instance PID/heartbeat the same way). PID = wmic process match; heartbeat = same heartbeat_*.json files used elsewhere in this dashboard; RISK_HALT current equity summed live from the accounts already fetched this cycle. Zero process control performed by this section.</div>
@@ -1623,7 +1623,7 @@ details.section>summary:active{background:var(--card2)}
 <span class="chip">{{ oracle_conn.emoji }} {{ oracle_conn.label }}</span>
 <span class="chip">Last update: {{ (oracle_conn.last_success_ago ~ 's ago') if oracle_conn.last_success_ago is not none else 'never' }}</span>
 {% if oracle_conn.next_retry_in is not none %}<span class="chip">Retry in {{ oracle_conn.next_retry_in }}s</span>{% endif %}
-<span class="chip">{{ ([oracle_meta.bybit_shield_alive, oracle_meta.ladder_guard_alive, oracle_meta.tg_signal_bot_alive, oracle_meta.liquidity_sweep_alive]|select('equalto', true)|list|length) if oracle_meta else 0 }}/4 bots alive</span>
+<span class="chip">{{ ([oracle_meta.bybit_shield_alive, oracle_meta.ladder_guard_alive, oracle_meta.tg_signal_bot_alive]|select('equalto', true)|list|length) if oracle_meta else 0 }}/3 required bots alive</span>
 </div>
 </div>
 </details>
