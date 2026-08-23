@@ -34,18 +34,91 @@ import urllib.parse
 # never hold its own copy of a threshold that could drift from what's
 # actually managing trades. Importing has no side effects (mt5.initialize()
 # only runs inside ladder_guard.main(), guarded by __main__).
-from ladder_guard import (STEPS_BY_CLASS as MT5_STEPS_BY_CLASS,
-                           classify_asset as mt5_classify_asset,
-                           RUNNER_TRIGGER as MT5_RUNNER_TRIGGER)
-from bot_period_guard import manual_block_reason as period_manual_block_reason
+try:
+    from ladder_guard import (STEPS_BY_CLASS as MT5_STEPS_BY_CLASS,
+                               classify_asset as mt5_classify_asset,
+                               RUNNER_TRIGGER as MT5_RUNNER_TRIGGER)
+except Exception:
+    MT5_STEPS_BY_CLASS = {}
+    MT5_RUNNER_TRIGGER = None
+    def mt5_classify_asset(_symbol):
+        return "UNKNOWN"
+try:
+    from bot_period_guard import manual_block_reason as period_manual_block_reason
+except Exception:
+    def period_manual_block_reason(_bot, _acc):
+        return None
 
 # 2026-08-07 (Ahmed's Portfolio Analytics/Risk/Reports request): read-only
 # historical-performance module, zero shared runtime state with any live
 # bot or trading logic -- see its own docstring for exactly what it does
 # and does not have access to.
-import portfolio_analytics as pa
-import alert_manager as am
-import autonomy_challenge as achall
+try:
+    import portfolio_analytics as pa
+except Exception:
+    class _PortfolioAnalyticsFallback:
+        NOT_AVAILABLE = "N/A"
+        ACTIVE_MAGICS = set()
+        @staticmethod
+        def last_heartbeat(_name):
+            return None
+        @staticmethod
+        def gold_btc_bot_eligibility(_acc, _equity, _risk_halted):
+            return None
+        @staticmethod
+        def risk_halt_status():
+            return {"halted": False}
+        @staticmethod
+        def risk_halt_detail(_accounts):
+            return {"active": False}
+        @staticmethod
+        def group_by_magic(_trades):
+            return {}
+        @staticmethod
+        def no_trade_status(_by_magic):
+            return []
+        @staticmethod
+        def asset_exposure_summary(_accounts):
+            return {}
+        @staticmethod
+        def oracle_attribution_summary():
+            return {"available": False, "reason": "portfolio_analytics unavailable"}
+        @staticmethod
+        def trade_source(_magic):
+            return "UNKNOWN"
+        @staticmethod
+        def strategy_attribution(_magic, _comment=""):
+            return "UNKNOWN"
+        @staticmethod
+        def fetch_all_closed_trades(days=7):
+            return [], []
+    pa = _PortfolioAnalyticsFallback()
+try:
+    import alert_manager as am
+except Exception:
+    class _AlertManagerFallback:
+        DEDUP_SECONDS = 0
+        @staticmethod
+        def evaluate(*_args, **_kwargs):
+            return []
+        @staticmethod
+        def process(_alerts):
+            return None
+        @staticmethod
+        def current_and_history():
+            return {}, {}, []
+    am = _AlertManagerFallback()
+try:
+    import autonomy_challenge as achall
+except Exception:
+    class _AutonomyChallengeFallback:
+        @staticmethod
+        def read_state():
+            return None
+        @staticmethod
+        def record_snapshot(*_args, **_kwargs):
+            return None
+    achall = _AutonomyChallengeFallback()
 
 app = Flask(__name__)
 
@@ -156,9 +229,9 @@ ACCOUNTS = {
     "Bybit MT5":  dict(path=r"C:\Program Files\MetaTrader 5\terminal64.exe",
                         login=None, password=None, server=None),
     "E1 (Exness)": dict(path=r"C:\MT5_Portable_3\terminal64.exe",
-                         login=<REDACTED_MT5_LOGIN_EM>, password="<REDACTED_MT5_PASSWORD_EM>", server="Exness-MT5Real35"),
+                         login=None, password="<REDACTED_MT5_PASSWORD_EM>", server="Exness-MT5Real35"),
     "E2 (Exness)": dict(path=r"C:\MT5_Portable_2\terminal64.exe",
-                         login=<REDACTED_MT5_LOGIN_EA>, password="<REDACTED_MT5_PASSWORD_EA>", server="Exness-MT5Real33"),
+                         login=None, password="<REDACTED_MT5_PASSWORD_EA>", server="Exness-MT5Real33"),
 }
 
 # 2026-07-28 (Ahmed's UI-only Control Layer request): maps this dashboard's
@@ -985,6 +1058,24 @@ def _demo():
         assert any(r["bot"] == "orb_eth_exness" and r["account"] == "EA" and r["status"] == "BLOCKED (MANUAL)" for r in rows), rows
     finally:
         globals()["period_manual_block_reason"] = orig_reason_fn
+
+    obs = _observability_model(
+        accounts=[{"name": "Bybit MT5", "positions": []}, {"name": "E1 (Exness)", "positions": []},
+                  {"name": "E2 (Exness)", "positions": []}, {"name": "Oracle (Bybit ccxt)", "positions": []}],
+        bot_health=[{"bot": "demo_shadow", "role": "RESEARCH", "state": "STALE", "heartbeat_age": "20m",
+                     "pid": 123, "account": "—", "can_trade": "NO", "manual_block_reason": None,
+                     "eligibility": None}],
+        oracle_meta={"bybit_shield_alive": True, "ladder_guard_alive": True, "tg_signal_bot_alive": True,
+                     "consecutive_failures": 0, "last_success_ts": 1, "next_retry_ts": 2},
+        risk_halt={"halted": False},
+        no_trade_status=[],
+        shadow={"overall": {"open": 0, "expired": 0, "closed": 0, "expectancy_r": 0}},
+        pending_breakout=None, pending_signal_runner=None, pending_signal_bridge=None,
+        pending_signal_shadow=None, manual_exit_shadow=None,
+        market_context={"monitors": []}, oracle_attr=None, cache_age_sec=1,
+    )
+    assert obs["score"] == 90, obs
+    assert any(p["component"] == "demo_shadow" and p["status"] == "STALE" for p in obs["problems"]), obs
 
     print("status_dashboard account-label self-check OK")
 
@@ -3063,6 +3154,13 @@ td{padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
 .na{color:var(--muted);font-style:italic}
 .footnote{color:var(--muted);font-size:12px;text-align:center;padding:10px 16px}
 .halt-banner{background:var(--bad-bg);color:var(--bad);border-radius:10px;padding:12px;margin-bottom:10px;font-weight:700;text-align:center}
+.health-score{font-size:42px;font-weight:900;line-height:1}
+.health-box{border:1px solid var(--border);border-radius:16px;padding:14px;background:var(--card);box-shadow:var(--shadow);margin-bottom:10px}
+.details-grid{display:grid;grid-template-columns:1fr;gap:10px}
+@media (min-width:780px){.details-grid{grid-template-columns:1fr 1fr}}
+.component-card{background:var(--card);border:1px solid var(--border);border-radius:12px;margin-bottom:10px;overflow:hidden}
+.component-title{padding:10px 12px;background:var(--card2);font-weight:800}
+.small{font-size:12px;color:var(--muted)}
 </style></head><body>
 <div class="nav"><a href="/">🏠 Dashboard</a><a href="/analytics">📊 Analytics</a><a href="/risk">⚠️ Risk</a><a href="/reports">📄 Reports</a><a href="/trades">📜 Trades</a><a href="/monitor" class="active">🖥️ Monitor</a></div>
 <h1>🖥️ Monitor (Read-Only)</h1>
@@ -3071,6 +3169,46 @@ td{padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
 {% if risk_halt.halted %}
 <div class="halt-banner">🛑 RISK_HALT ACTIVE since {{ risk_halt.since }}</div>
 {% endif %}
+
+<h2>🧭 FULL-DETAIL OBSERVABILITY</h2>
+<div class="health-box">
+  <div class="row"><span><b>Health Score</b></span><span class="health-score" style="color:{{ 'var(--good)' if observability.score >= 90 else ('var(--warn)' if observability.score >= 70 else 'var(--bad)') }}">{{ observability.score }}</span></div>
+  <div class="small">Score starts at 100. Deductions below are explicit; retired Oracle services are not deducted.</div>
+</div>
+<div class="details-grid">
+  <div class="card">
+    <b>Score deductions</b>
+    {% for d in observability.deductions %}
+    <div class="row"><span>{{ d.reason }}</span><span>{{ d.points }} pts</span></div>
+    <div class="small">{{ d.evidence }}</div>
+    {% endfor %}
+  </div>
+  <div class="card">
+    <b>Current actionable problems</b>
+    {% for p in observability.problems %}
+    <div class="row"><span><span class="badge {{ 'b-bad' if p.severity == 'HIGH' else 'b-warn' }}">{{ p.severity }}</span> {{ p.component }}</span><span>{{ p.status }}</span></div>
+    <div class="small">Evidence: {{ p.evidence }} · user action: {{ p.user_action }} · action: {{ p.recommended_action }}</div>
+    {% endfor %}
+    {% if not observability.problems %}<div class="na">No actionable current problems.</div>{% endif %}
+  </div>
+</div>
+
+{% for group, rows in observability.components.items() %}
+<div class="component-card">
+  <div class="component-title">{{ group }} ({{ rows|length }})</div>
+  <div class="tbl-wrap"><table>
+  <tr><th>Name</th><th>Type</th><th>Mode</th><th>Status</th><th>Heartbeat</th><th>PID</th><th>Account(s)</th><th>Symbols</th><th>Issue/Error</th><th>Last event</th><th>Recommended action</th><th>Can execute?</th></tr>
+  {% for c in rows %}
+  <tr>
+    <td><b>{{ c.name }}</b></td><td>{{ c.kind }}</td><td>{{ c.mode }}</td>
+    <td><span class="badge {{ c.status_class }}">{{ c.status }}</span></td>
+    <td>{{ c.heartbeat }}</td><td>{{ c.pid }}</td><td>{{ c.accounts }}</td><td>{{ c.symbols }}</td>
+    <td>{{ c.issue }}</td><td>{{ c.event }}</td><td>{{ c.action }}</td><td>{{ c.can_execute }}</td>
+  </tr>
+  {% endfor %}
+  </table></div>
+</div>
+{% endfor %}
 
 {% if autonomy_challenge %}
 <h2>🔥 7-DAY AUTONOMY CHALLENGE</h2>
@@ -3419,6 +3557,7 @@ def _source_from_strategy_string(strategy):
 def monitor_page():
     with _cache_lock:
         accounts = _cache["accounts"]
+        oracle_meta = _cache["oracle_meta"]
     trades, mt5_errors, cache_ts = _get_trades(days=7)
     by_magic = pa.group_by_magic(trades)
 
@@ -3441,22 +3580,39 @@ def monitor_page():
             open_positions.append(row)
 
     nts = pa.no_trade_status(by_magic)
+    risk_halt = pa.risk_halt_status()
+    shadow = _shadow_view()
+    pending_breakout = _pending_breakout_shadow_view()
+    pending_signal_runner = _pending_signal_runner_view()
+    pending_signal_bridge = _pending_signal_bridge_view()
+    pending_signal_shadow = _pending_signal_shadow_view()
+    manual_exit_shadow = _manual_exit_shadow_view()
+    market_context = _monitor_context_view()
+    oracle_attr = _get_oracle_attribution()
+    bot_health = bot_health_detail(accounts, risk_halt.get("halted", False))
+    cache_age_sec = round(time.time() - cache_ts)
+    observability = _observability_model(
+        accounts, bot_health, oracle_meta, risk_halt, nts, shadow, pending_breakout,
+        pending_signal_runner, pending_signal_bridge, pending_signal_shadow,
+        manual_exit_shadow, market_context, oracle_attr, cache_age_sec,
+    )
     return render_template_string(
         MONITOR_PAGE,
         trades_today=trades_today, trades_week=trades_week, open_positions=open_positions,
         no_trade_status=nts,
-        risk_halt=pa.risk_halt_status(),
+        risk_halt=risk_halt,
         exposure=pa.asset_exposure_summary(accounts),
-        oracle_attr=_get_oracle_attribution(),
-        market_context=_monitor_context_view(),
+        oracle_attr=oracle_attr,
+        market_context=market_context,
         autonomy_challenge=_autonomy_challenge_view(nts),
-        shadow=_shadow_view(),
-        pending_breakout_shadow=_pending_breakout_shadow_view(),
-        pending_signal_runner=_pending_signal_runner_view(),
-        pending_signal_bridge=_pending_signal_bridge_view(),
-        pending_signal_shadow=_pending_signal_shadow_view(),
-        manual_exit_shadow=_manual_exit_shadow_view(),
-        mt5_errors=mt5_errors, cache_age_sec=round(time.time() - cache_ts),
+        shadow=shadow,
+        pending_breakout_shadow=pending_breakout,
+        pending_signal_runner=pending_signal_runner,
+        pending_signal_bridge=pending_signal_bridge,
+        pending_signal_shadow=pending_signal_shadow,
+        manual_exit_shadow=manual_exit_shadow,
+        observability=observability,
+        mt5_errors=mt5_errors, cache_age_sec=cache_age_sec,
     )
 
 
@@ -3634,27 +3790,226 @@ def _pending_signal_shadow_view():
         return None
 
 
+def _component_status(status):
+    if status in ("RUNNING", "HEALTHY", "OK", "READY"):
+        return "b-good"
+    if status in ("STALE", "BLOCKED", "NOT_READY", "INCONCLUSIVE", "UNKNOWN"):
+        return "b-warn"
+    if status in ("DOWN", "ERROR"):
+        return "b-bad"
+    return "b-muted"
+
+
+def _component(name, group, kind, status, heartbeat="n/a", pid="—", accounts="—",
+               symbols="—", mode="READ_ONLY", issue="—", event="—",
+               action="Monitor", can_execute="NO"):
+    return {
+        "name": name,
+        "group": group,
+        "kind": kind,
+        "status": status,
+        "status_class": _component_status(status),
+        "heartbeat": heartbeat,
+        "pid": pid,
+        "accounts": accounts,
+        "symbols": symbols,
+        "mode": mode,
+        "issue": issue,
+        "event": event,
+        "action": action,
+        "can_execute": can_execute,
+    }
+
+
+def _observability_model(accounts, bot_health, oracle_meta, risk_halt, no_trade_status,
+                         shadow, pending_breakout, pending_signal_runner,
+                         pending_signal_bridge, pending_signal_shadow, manual_exit_shadow,
+                         market_context, oracle_attr, cache_age_sec):
+    """Builds the full-detail monitor view from already-fetched dashboard data.
+    No SSH, MT5, exchange, process control, or trading calls are made here."""
+    components = {"Local Bots": [], "Oracle Bots": [], "Shadows": [], "Infrastructure": []}
+    problems = []
+
+    for b in bot_health:
+        group = "Infrastructure" if b["role"] == "INFRASTRUCTURE" else "Local Bots"
+        issue = b["manual_block_reason"] or ("Heartbeat stale" if b["state"] == "STALE" else "—")
+        action = "Investigate heartbeat" if b["state"] == "STALE" else ("Start only if approved-active" if b["state"] == "STOPPED" and b["can_trade"] != "NO" else "Monitor")
+        components[group].append(_component(
+            b["bot"], group, b["role"], b["state"], b["heartbeat_age"], b["pid"],
+            b["account"], "see strategy config", "LIVE" if b["can_trade"] == "YES" else b["can_trade"],
+            issue, b["eligibility"] or "—", action, "YES" if b["can_trade"] == "YES" else "NO",
+        ))
+
+    oracle_services = [
+        ("bybit_shield", oracle_meta.get("bybit_shield_alive"), "PROTECTION"),
+        ("ladder_guard_bybit", oracle_meta.get("ladder_guard_alive"), "PROTECTION"),
+        ("tg_signal_bot", oracle_meta.get("tg_signal_bot_alive"), "SIGNAL"),
+    ]
+    for name, alive, role in oracle_services:
+        status = "RUNNING" if alive else ("UNKNOWN" if alive is None else "DOWN")
+        components["Oracle Bots"].append(_component(
+            name, "Oracle Bots", role, status, "from cached Oracle fetch", "oracle", "Oracle",
+            "Bybit/Oracle", "LIVE", "—" if alive else "missing from Oracle cache",
+            "expected-active Oracle service", "Investigate Oracle process" if alive is False else "Monitor",
+            "YES" if role == "SIGNAL" else "NO",
+        ))
+    components["Oracle Bots"].append(_component(
+        "liquidity_sweep_bot", "Oracle Bots", "TRADING", "BLOCKED",
+        "retired heartbeat ignored", "—", "Oracle", "BTC", "STOPPED_BY_DESIGN",
+        "retired 2026-08-16, not expected-active", "excluded from health score",
+        "No action unless explicitly re-approved", "NO",
+    ))
+    components["Oracle Bots"].append(_component(
+        "orb_bot", "Oracle Bots", "TRADING", "BLOCKED",
+        "retired heartbeat ignored", "—", "Oracle", "SOL/ETH/XRP/ADA/DOT", "STOPPED_BY_DESIGN",
+        "retired 2026-08-16, not expected-active", "excluded from health score",
+        "No action unless explicitly re-approved", "NO",
+    ))
+    components["Oracle Bots"].append(_component(
+        "live_decay_watch", "Oracle Bots", "WATCH", "RUNNING",
+        "cron every 4h", "cron", "Oracle", "live groups", "READ_ONLY",
+        "cron-only, not a daemon", "uses existing Oracle cadence", "Monitor", "NO",
+    ))
+
+    if shadow:
+        components["Shadows"].append(_component(
+            "shadow_scoreboard", "Shadows", "SHADOW", "RUNNING",
+            "event log", "—", "—", "multi", "SHADOW",
+            f"open={shadow['overall'].get('open', 0)} expired={shadow['overall'].get('expired', 0)}",
+            f"closed={shadow['overall'].get('closed', 0)} expectancy={shadow['overall'].get('expectancy_r', 'n/a')}R",
+            "Monitor open shadow calls", "NO",
+        ))
+    for name, view, label in [
+        ("pending_breakout_shadow", pending_breakout, "XAUUSDm"),
+        ("pending_signal_runner", pending_signal_runner, "pending signals"),
+        ("pending_signal_bridge", pending_signal_bridge, "pending signals"),
+    ]:
+        if not view:
+            continue
+        stale = (view.get("last_tick_age_ms") or 0) > 15 * 60 * 1000
+        status = "STALE" if view.get("alive") and stale else ("RUNNING" if view.get("alive") else "DOWN")
+        issue = view.get("last_error") or ("stale tick/context" if stale else "—")
+        components["Shadows"].append(_component(
+            name, "Shadows", "SHADOW", status,
+            f"{view.get('last_tick_age_ms', 'n/a')} ms tick age", view.get("pid") or "—",
+            "EA shadow", label, "SHADOW", issue,
+            f"engine={view.get('engine_state', '—')} active_trade={view.get('has_active_trade')}",
+            "Diagnose feed before restart" if status == "STALE" else "Monitor", "NO",
+        ))
+    if pending_signal_shadow:
+        readiness = "READY" if pending_signal_shadow.get("triggered") else "NOT_READY"
+        components["Shadows"].append(_component(
+            "pending_signal_shadow", "Shadows", "SHADOW", readiness,
+            pending_signal_shadow.get("generated_at", "n/a"), "—", "—", "gold signals", "SHADOW",
+            f"readiness={pending_signal_shadow.get('top_source') or 'n/a'}",
+            f"signals={pending_signal_shadow.get('signals_received', 0)} open={pending_signal_shadow.get('open_orders_total', 0)}",
+            "Keep collecting samples", "NO",
+        ))
+    if manual_exit_shadow:
+        components["Shadows"].append(_component(
+            "manual_exit_shadow_tracker", "Shadows", "SHADOW", "RUNNING" if manual_exit_shadow.get("alive") else "DOWN",
+            manual_exit_shadow.get("last_run_utc") or "never", manual_exit_shadow.get("pid") or "—",
+            "BA/EA/EM", "manual exits", "SHADOW",
+            f"verdict={manual_exit_shadow.get('current_verdict')}",
+            f"post_fix_live={manual_exit_shadow.get('post_fix_live_samples')}", "Monitor", "NO",
+        ))
+
+    components["Infrastructure"].append(_component(
+        "status_dashboard", "Infrastructure", "INFRA", "RUNNING",
+        f"cache age {cache_age_sec}s", "self", "local", "dashboard", "READ_ONLY",
+        "—", "serves / and /monitor", "Monitor", "NO",
+    ))
+    components["Infrastructure"].append(_component(
+        "Oracle SSH/cache", "Infrastructure", "INFRA",
+        "RUNNING" if (oracle_meta.get("consecutive_failures") or 0) == 0 else "STALE",
+        f"last success {oracle_meta.get('last_success_ts') or 'never'}", "cache", "Oracle", "ssh",
+        "READ_ONLY", f"failures={oracle_meta.get('consecutive_failures') or 0}",
+        f"next_retry={oracle_meta.get('next_retry_ts') or 'n/a'}", "Reuse cache; do not add polling", "NO",
+    ))
+    for m in (market_context or {}).get("monitors", []):
+        components["Infrastructure"].append(_component(
+            m["name"], "Infrastructure", "INFRA", "RUNNING" if m["age_text"] != "N/A" else "UNKNOWN",
+            m["age_text"], "—", "local", "market context", "READ_ONLY", "—", "heartbeat file",
+            "Monitor", "NO",
+        ))
+
+    deductions = []
+    def deduct(points, reason, evidence):
+        deductions.append({"points": points, "reason": reason, "evidence": evidence})
+
+    if any(a.get("error") for a in accounts):
+        deduct(20, "Account fetch error", "; ".join(f"{a.get('name')}: {a.get('error')}" for a in accounts if a.get("error")))
+    if not all(v is True for _, v, _ in oracle_services):
+        deduct(15, "Expected-active Oracle service missing", "Only retired services are excluded")
+    if risk_halt.get("halted"):
+        deduct(20, "RISK_HALT active", risk_halt.get("since") or "active")
+    stale_components = [c for rows in components.values() for c in rows if c["status"] == "STALE"]
+    if stale_components:
+        deduct(10, "Stale component data", ", ".join(c["name"] for c in stale_components[:4]))
+    down_components = [c for rows in components.values() for c in rows if c["status"] == "DOWN"]
+    if down_components:
+        deduct(20, "Down expected component", ", ".join(c["name"] for c in down_components[:4]))
+    if shadow and shadow["overall"].get("open", 0):
+        deduct(5, "Open shadow calls need review", f"open={shadow['overall'].get('open')}")
+
+    score = max(0, 100 - sum(d["points"] for d in deductions))
+    if not deductions:
+        deductions.append({"points": 0, "reason": "No current health deductions", "evidence": "all expected-active checks OK"})
+
+    for c in [c for rows in components.values() for c in rows if c["status"] in ("DOWN", "STALE", "BLOCKED", "NOT_READY", "INCONCLUSIVE")]:
+        if c["status"] == "BLOCKED" and "retired" in c["issue"]:
+            continue
+        problems.append({
+            "severity": "HIGH" if c["status"] == "DOWN" else "MEDIUM",
+            "component": c["name"],
+            "status": c["status"],
+            "evidence": c["issue"],
+            "user_action": "YES" if c["action"].startswith("No action unless") else "NO",
+            "recommended_action": c["action"],
+        })
+
+    return {"components": components, "score": score, "deductions": deductions,
+            "problems": problems, "oracle_attr": oracle_attr}
+
+
 @app.route("/api/monitor")
 def api_monitor():
     with _cache_lock:
         accounts = _cache["accounts"]
+        oracle_meta = _cache["oracle_meta"]
     trades, mt5_errors, cache_ts = _get_trades(days=7)
     by_magic = pa.group_by_magic(trades)
     nts = pa.no_trade_status(by_magic)
+    risk_halt = pa.risk_halt_status()
+    shadow = _shadow_view()
+    pending_breakout = _pending_breakout_shadow_view()
+    pending_signal_runner = _pending_signal_runner_view()
+    pending_signal_bridge = _pending_signal_bridge_view()
+    pending_signal_shadow = _pending_signal_shadow_view()
+    manual_exit_shadow = _manual_exit_shadow_view()
+    market_context = _monitor_context_view()
+    oracle_attr = _get_oracle_attribution()
+    cache_age_sec = round(time.time() - cache_ts)
+    bot_health = bot_health_detail(accounts, risk_halt.get("halted", False))
     return jsonify({
         "no_trade_status": nts,
-        "risk_halt": pa.risk_halt_status(),
+        "risk_halt": risk_halt,
         "asset_exposure": pa.asset_exposure_summary(accounts),
-        "oracle_attribution": _get_oracle_attribution(),
+        "oracle_attribution": oracle_attr,
         "autonomy_challenge": _autonomy_challenge_view(nts),
-        "shadow": _shadow_view(),
-        "pending_breakout_shadow": _pending_breakout_shadow_view(),
-        "pending_signal_runner": _pending_signal_runner_view(),
-        "pending_signal_bridge": _pending_signal_bridge_view(),
-        "pending_signal_shadow": _pending_signal_shadow_view(),
-        "manual_exit_shadow": _manual_exit_shadow_view(),
+        "shadow": shadow,
+        "pending_breakout_shadow": pending_breakout,
+        "pending_signal_runner": pending_signal_runner,
+        "pending_signal_bridge": pending_signal_bridge,
+        "pending_signal_shadow": pending_signal_shadow,
+        "manual_exit_shadow": manual_exit_shadow,
+        "observability": _observability_model(
+            accounts, bot_health, oracle_meta, risk_halt, nts, shadow, pending_breakout,
+            pending_signal_runner, pending_signal_bridge, pending_signal_shadow,
+            manual_exit_shadow, market_context, oracle_attr, cache_age_sec,
+        ),
         "mt5_errors": mt5_errors,
-        "cached_age_sec": round(time.time() - cache_ts),
+        "cached_age_sec": cache_age_sec,
     })
 
 
