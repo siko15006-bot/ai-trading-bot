@@ -34,20 +34,31 @@ import urllib.parse
 # never hold its own copy of a threshold that could drift from what's
 # actually managing trades. Importing has no side effects (mt5.initialize()
 # only runs inside ladder_guard.main(), guarded by __main__).
+DEPENDENCY_ERRORS = {}
+
+
+def _dependency_failed(name, error):
+    DEPENDENCY_ERRORS[name] = f"{type(error).__name__}: {error}"[:240]
+
+
 try:
     from ladder_guard import (STEPS_BY_CLASS as MT5_STEPS_BY_CLASS,
                                classify_asset as mt5_classify_asset,
-                               RUNNER_TRIGGER as MT5_RUNNER_TRIGGER)
-except Exception:
+                               RUNNER_TRIGGER as MT5_RUNNER_TRIGGER,
+                               ACCOUNTS as LIVE_MT5_ACCOUNTS)
+except (ImportError, SyntaxError) as e:
+    _dependency_failed("ladder_guard", e)
     MT5_STEPS_BY_CLASS = {}
     MT5_RUNNER_TRIGGER = None
+    LIVE_MT5_ACCOUNTS = {}
     def mt5_classify_asset(_symbol):
         return "UNKNOWN"
 try:
     from bot_period_guard import manual_block_reason as period_manual_block_reason
-except Exception:
+except (ImportError, SyntaxError) as e:
+    _dependency_failed("bot_period_guard", e)
     def period_manual_block_reason(_bot, _acc):
-        return None
+        return "ERROR: bot_period_guard unavailable"
 
 # 2026-08-07 (Ahmed's Portfolio Analytics/Risk/Reports request): read-only
 # historical-performance module, zero shared runtime state with any live
@@ -55,8 +66,9 @@ except Exception:
 # and does not have access to.
 try:
     import portfolio_analytics as pa
-except Exception:
-    class _PortfolioAnalyticsFallback:
+except (ImportError, SyntaxError) as e:
+    _dependency_failed("portfolio_analytics", e)
+    class _PortfolioAnalyticsUnavailable:
         NOT_AVAILABLE = "N/A"
         ACTIVE_MAGICS = set()
         @staticmethod
@@ -67,16 +79,18 @@ except Exception:
             return None
         @staticmethod
         def risk_halt_status():
-            return {"halted": False}
+            return {"halted": None, "status": "ERROR", "error": "portfolio_analytics unavailable"}
         @staticmethod
         def risk_halt_detail(_accounts):
-            return {"active": False}
+            return {"active": None, "status": "ERROR", "error": "portfolio_analytics unavailable"}
         @staticmethod
         def group_by_magic(_trades):
             return {}
         @staticmethod
         def no_trade_status(_by_magic):
-            return []
+            return [{"bot": "portfolio_analytics", "status": "EXECUTION_ERROR",
+                     "reason": "dependency unavailable", "last_trade_time": None,
+                     "time_since_last_trade_sec": None, "last_heartbeat_age_sec": None}]
         @staticmethod
         def asset_exposure_summary(_accounts):
             return {}
@@ -92,33 +106,43 @@ except Exception:
         @staticmethod
         def fetch_all_closed_trades(days=7):
             return [], []
-    pa = _PortfolioAnalyticsFallback()
+    pa = _PortfolioAnalyticsUnavailable()
 try:
     import alert_manager as am
-except Exception:
-    class _AlertManagerFallback:
+except (ImportError, SyntaxError) as e:
+    _dependency_failed("alert_manager", e)
+    class _AlertManagerUnavailable:
         DEDUP_SECONDS = 0
         @staticmethod
         def evaluate(*_args, **_kwargs):
-            return []
+            raise RuntimeError("alert_manager unavailable")
         @staticmethod
         def process(_alerts):
             return None
         @staticmethod
         def current_and_history():
-            return {}, {}, []
-    am = _AlertManagerFallback()
+            return ({"dependency": "ERROR"}, {}, [{"error": "alert_manager unavailable"}])
+    am = _AlertManagerUnavailable()
 try:
     import autonomy_challenge as achall
-except Exception:
-    class _AutonomyChallengeFallback:
+except (ImportError, SyntaxError) as e:
+    _dependency_failed("autonomy_challenge", e)
+    class _AutonomyChallengeUnavailable:
         @staticmethod
         def read_state():
             return None
         @staticmethod
         def record_snapshot(*_args, **_kwargs):
-            return None
-    achall = _AutonomyChallengeFallback()
+            raise RuntimeError("autonomy_challenge unavailable")
+    achall = _AutonomyChallengeUnavailable()
+
+
+def _pa_call(method, default, *args):
+    try:
+        return getattr(pa, method)(*args)
+    except Exception as e:
+        _dependency_failed("portfolio_analytics.runtime", e)
+        return default
 
 app = Flask(__name__)
 
@@ -225,13 +249,17 @@ def _control_equity_by_code(accounts):
 ORACLE_SSH_KEY = r"C:\Users\ahmed\Desktop\oracle_key"
 ORACLE_HOST = "ubuntu@<REDACTED_ORACLE_IP>"
 
+def _account_config(code, path):
+    """Use the existing live credential source; never store sanitized credentials here."""
+    if code in LIVE_MT5_ACCOUNTS:
+        return dict(LIVE_MT5_ACCOUNTS[code])
+    return {"path": path, "dependency_error": "ladder_guard account config unavailable"}
+
+
 ACCOUNTS = {
-    "Bybit MT5":  dict(path=r"C:\Program Files\MetaTrader 5\terminal64.exe",
-                        login=None, password=None, server=None),
-    "E1 (Exness)": dict(path=r"C:\MT5_Portable_3\terminal64.exe",
-                         login=None, password="<REDACTED_MT5_PASSWORD_EM>", server="Exness-MT5Real35"),
-    "E2 (Exness)": dict(path=r"C:\MT5_Portable_2\terminal64.exe",
-                         login=None, password="<REDACTED_MT5_PASSWORD_EA>", server="Exness-MT5Real33"),
+    "Bybit MT5": _account_config("BA", r"C:\Program Files\MetaTrader 5\terminal64.exe"),
+    "E1 (Exness)": _account_config("EM", r"C:\MT5_Portable_3\terminal64.exe"),
+    "E2 (Exness)": _account_config("EA", r"C:\MT5_Portable_2\terminal64.exe"),
 }
 
 # 2026-07-28 (Ahmed's UI-only Control Layer request): maps this dashboard's
@@ -718,9 +746,11 @@ def build_alerts(all_positions, oracle_meta, accounts):
 # ---------------------------------------------------------------------------
 
 def fetch_account(name, cfg):
+    if cfg.get("dependency_error"):
+        return {"name": name, "error": f"ERROR: {cfg['dependency_error']}"}
     try:
         kwargs = {"path": cfg["path"]}
-        if cfg["login"]:
+        if cfg.get("login"):
             kwargs.update(login=cfg["login"], password=cfg["password"], server=cfg["server"])
         if not mt5.initialize(**kwargs):
             time.sleep(2)
@@ -949,7 +979,7 @@ def bot_health_detail(accounts, risk_halted):
                           if pid_lbl[1] == acc or (acc is None and pid_lbl[1] not in seen_accs - {acc})), None)
             pid = match[0] if match else None
             hb_name = _heartbeat_name(marker, acc) if stale_after else None
-            hb = pa.last_heartbeat(hb_name) if hb_name else None
+            hb = _pa_call("last_heartbeat", None, hb_name) if hb_name else None
             if pid is None:
                 state = "STOPPED"
             elif stale_after is None:
@@ -989,7 +1019,8 @@ def bot_health_detail(accounts, risk_halted):
 
             eligibility = None
             if marker == "gold_btc_bot" and acc:
-                eligibility = pa.gold_btc_bot_eligibility(acc, equity_by_acc.get(acc), risk_halted)
+                eligibility = _pa_call("gold_btc_bot_eligibility", "ERROR: dependency unavailable",
+                                       acc, equity_by_acc.get(acc), risk_halted)
 
             out.append({
                 "bot": (
@@ -1044,6 +1075,12 @@ def _demo():
     ])
     assert equity_map == {"BA": 91.25, "EM": 42.0, "EA": 133.5}, equity_map
 
+    LIVE_MT5_ACCOUNTS["TEST"] = {"path": "terminal", "login": 123, "password": "secret", "server": "live"}
+    try:
+        assert _account_config("TEST", "fallback")["login"] == 123
+    finally:
+        del LIVE_MT5_ACCOUNTS["TEST"]
+
     orig_reason_fn = globals()["period_manual_block_reason"]
     try:
         def _fake_manual(bot, acc):
@@ -1059,23 +1096,34 @@ def _demo():
     finally:
         globals()["period_manual_block_reason"] = orig_reason_fn
 
-    obs = _observability_model(
-        accounts=[{"name": "Bybit MT5", "positions": []}, {"name": "E1 (Exness)", "positions": []},
-                  {"name": "E2 (Exness)", "positions": []}, {"name": "Oracle (Bybit ccxt)", "positions": []}],
-        bot_health=[{"bot": "demo_shadow", "role": "RESEARCH", "state": "STALE", "heartbeat_age": "20m",
-                     "pid": 123, "account": "—", "can_trade": "NO", "manual_block_reason": None,
-                     "eligibility": None}],
-        oracle_meta={"bybit_shield_alive": True, "ladder_guard_alive": True, "tg_signal_bot_alive": True,
-                     "consecutive_failures": 0, "last_success_ts": 1, "next_retry_ts": 2},
-        risk_halt={"halted": False},
-        no_trade_status=[],
-        shadow={"overall": {"open": 0, "expired": 0, "closed": 0, "expectancy_r": 0}},
-        pending_breakout=None, pending_signal_runner=None, pending_signal_bridge=None,
-        pending_signal_shadow=None, manual_exit_shadow=None,
-        market_context={"monitors": []}, oracle_attr=None, cache_age_sec=1,
-    )
+    def _demo_obs():
+        return _observability_model(
+            accounts=[{"name": "Bybit MT5", "positions": []}, {"name": "E1 (Exness)", "positions": []},
+                      {"name": "E2 (Exness)", "positions": []}, {"name": "Oracle (Bybit ccxt)", "positions": []}],
+            bot_health=[{"bot": "demo_shadow", "role": "RESEARCH", "state": "STALE", "heartbeat_age": "20m",
+                         "pid": 123, "account": "—", "can_trade": "NO", "manual_block_reason": None,
+                         "eligibility": None}],
+            oracle_meta={"bybit_shield_alive": True, "ladder_guard_alive": True, "tg_signal_bot_alive": True,
+                         "consecutive_failures": 0, "last_success_ts": 1, "next_retry_ts": 2},
+            risk_halt={"halted": False}, no_trade_status=[],
+            shadow={"overall": {"open": 0, "expired": 0, "closed": 0, "expectancy_r": 0}},
+            pending_breakout=None, pending_signal_runner=None, pending_signal_bridge=None,
+            pending_signal_shadow=None, manual_exit_shadow=None,
+            market_context={"monitors": []}, oracle_attr=None, cache_age_sec=1,
+        )
+
+    import_errors = dict(DEPENDENCY_ERRORS)
+    DEPENDENCY_ERRORS.clear()
+    obs = _demo_obs()
     assert obs["score"] == 90, obs
     assert any(p["component"] == "demo_shadow" and p["status"] == "STALE" for p in obs["problems"]), obs
+    DEPENDENCY_ERRORS["demo_dependency"] = "ImportError: simulated"
+    failed_obs = _demo_obs()
+    assert failed_obs["score"] == 70, failed_obs
+    assert any(p["component"] == "demo_dependency" and p["status"] == "ERROR"
+               for p in failed_obs["problems"]), failed_obs
+    DEPENDENCY_ERRORS.clear()
+    DEPENDENCY_ERRORS.update(import_errors)
 
     print("status_dashboard account-label self-check OK")
 
@@ -1114,8 +1162,8 @@ def refresh_loop():
         try:
             current_alerts = am.evaluate(accounts, bots, _cache["oracle_meta"], _oracle_cache.get("data"))
             am.process(current_alerts)
-        except Exception:
-            pass
+        except Exception as e:
+            _dependency_failed("alert_manager.runtime", e)
         # 2026-08-09 (Ahmed's 7-Day Autonomy / $300 challenge): same pattern
         # as the alert-manager step above -- one more read-only step on this
         # existing refresh cycle, wrapped so a failure here can never affect
@@ -1143,12 +1191,13 @@ def refresh_loop():
                     accounts, _chall_mt5_trades, _chall_oracle_fills,
                     risk_halted=pa.risk_halt_status().get("halted", False),
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            _dependency_failed("autonomy_challenge.runtime", e)
         time.sleep(REFRESH_SEC)
 
 
-threading.Thread(target=refresh_loop, daemon=True).start()
+if "--test" not in sys.argv:
+    threading.Thread(target=refresh_loop, daemon=True).start()
 
 
 PAGE = """
@@ -1865,7 +1914,7 @@ def index():
     fees_costs_summary = pa.NOT_AVAILABLE
     top_losing_bot = trade_history_ctx["top_losing_bot"]
     risk_halt_detail = pa.risk_halt_detail(accounts)
-    bot_health = bot_health_detail(accounts, risk_halt_detail["active"])
+    bot_health = bot_health_detail(accounts, risk_halt_detail.get("active") is not False)
     manual_entry_blocks = _manual_entry_block_rows()
     bot_health_summary = {
         "trading_capable": sum(1 for b in bot_health if b["role"] == "TRADING"),
@@ -3514,7 +3563,11 @@ def _autonomy_challenge_view(no_trade_status_list):
     state file -- see record_snapshot()'s docstring for why (avoids the
     same recurring-error double-count class of bug last_error()'s
     recency window fixed earlier)."""
-    state = achall.read_state()
+    try:
+        state = achall.read_state()
+    except Exception as e:
+        _dependency_failed("autonomy_challenge.runtime", e)
+        return None
     if not state:
         return None
     from datetime import datetime as _dt, timezone as _tz
@@ -3559,11 +3612,11 @@ def monitor_page():
         accounts = _cache["accounts"]
         oracle_meta = _cache["oracle_meta"]
     trades, mt5_errors, cache_ts = _get_trades(days=7)
-    by_magic = pa.group_by_magic(trades)
+    by_magic = _pa_call("group_by_magic", {}, trades)
 
     def _enrich_center(t):
         e = _enrich_trade(t)
-        e["source"] = pa.trade_source(t["magic"])
+        e["source"] = _pa_call("trade_source", "ERROR", t["magic"])
         e["attribution_confidence"] = "HIGH"  # MT5 magic -- deterministic, never ambiguous
         return e
 
@@ -3579,8 +3632,11 @@ def monitor_page():
             row["attribution_confidence"] = "INSUFFICIENT_DATA" if is_oracle else "HIGH"
             open_positions.append(row)
 
-    nts = pa.no_trade_status(by_magic)
-    risk_halt = pa.risk_halt_status()
+    nts = _pa_call("no_trade_status", [{"bot": "portfolio_analytics", "status": "EXECUTION_ERROR",
+                                        "reason": "runtime dependency failure", "last_trade_time": None,
+                                        "time_since_last_trade_sec": None, "last_heartbeat_age_sec": None}], by_magic)
+    risk_halt = _pa_call("risk_halt_status", {"halted": None, "status": "ERROR",
+                                               "error": "portfolio_analytics runtime failure"})
     shadow = _shadow_view()
     pending_breakout = _pending_breakout_shadow_view()
     pending_signal_runner = _pending_signal_runner_view()
@@ -3589,7 +3645,7 @@ def monitor_page():
     manual_exit_shadow = _manual_exit_shadow_view()
     market_context = _monitor_context_view()
     oracle_attr = _get_oracle_attribution()
-    bot_health = bot_health_detail(accounts, risk_halt.get("halted", False))
+    bot_health = bot_health_detail(accounts, risk_halt.get("halted") is not False)
     cache_age_sec = round(time.time() - cache_ts)
     observability = _observability_model(
         accounts, bot_health, oracle_meta, risk_halt, nts, shadow, pending_breakout,
@@ -3601,7 +3657,7 @@ def monitor_page():
         trades_today=trades_today, trades_week=trades_week, open_positions=open_positions,
         no_trade_status=nts,
         risk_halt=risk_halt,
-        exposure=pa.asset_exposure_summary(accounts),
+        exposure=_pa_call("asset_exposure_summary", {}, accounts),
         oracle_attr=oracle_attr,
         market_context=market_context,
         autonomy_challenge=_autonomy_challenge_view(nts),
@@ -3830,6 +3886,13 @@ def _observability_model(accounts, bot_health, oracle_meta, risk_halt, no_trade_
     components = {"Local Bots": [], "Oracle Bots": [], "Shadows": [], "Infrastructure": []}
     problems = []
 
+    for name, error in sorted(dict(DEPENDENCY_ERRORS).items()):
+        components["Infrastructure"].append(_component(
+            name, "Infrastructure", "DEPENDENCY", "ERROR", "startup/runtime check", "—",
+            "local", "dashboard", "READ_ONLY", error, "dependency unavailable",
+            "Restore dependency before trusting affected fields", "NO",
+        ))
+
     for b in bot_health:
         group = "Infrastructure" if b["role"] == "INFRASTRUCTURE" else "Local Bots"
         issue = b["manual_block_reason"] or ("Heartbeat stale" if b["state"] == "STALE" else "—")
@@ -3939,6 +4002,8 @@ def _observability_model(accounts, bot_health, oracle_meta, risk_halt, no_trade_
 
     if any(a.get("error") for a in accounts):
         deduct(20, "Account fetch error", "; ".join(f"{a.get('name')}: {a.get('error')}" for a in accounts if a.get("error")))
+    if DEPENDENCY_ERRORS:
+        deduct(20, "Dashboard dependency failure", "; ".join(sorted(DEPENDENCY_ERRORS)))
     if not all(v is True for _, v, _ in oracle_services):
         deduct(15, "Expected-active Oracle service missing", "Only retired services are excluded")
     if risk_halt.get("halted"):
@@ -3956,11 +4021,11 @@ def _observability_model(accounts, bot_health, oracle_meta, risk_halt, no_trade_
     if not deductions:
         deductions.append({"points": 0, "reason": "No current health deductions", "evidence": "all expected-active checks OK"})
 
-    for c in [c for rows in components.values() for c in rows if c["status"] in ("DOWN", "STALE", "BLOCKED", "NOT_READY", "INCONCLUSIVE")]:
+    for c in [c for rows in components.values() for c in rows if c["status"] in ("ERROR", "DOWN", "STALE", "BLOCKED", "NOT_READY", "INCONCLUSIVE")]:
         if c["status"] == "BLOCKED" and "retired" in c["issue"]:
             continue
         problems.append({
-            "severity": "HIGH" if c["status"] == "DOWN" else "MEDIUM",
+            "severity": "HIGH" if c["status"] in ("ERROR", "DOWN") else "MEDIUM",
             "component": c["name"],
             "status": c["status"],
             "evidence": c["issue"],
@@ -3978,9 +4043,12 @@ def api_monitor():
         accounts = _cache["accounts"]
         oracle_meta = _cache["oracle_meta"]
     trades, mt5_errors, cache_ts = _get_trades(days=7)
-    by_magic = pa.group_by_magic(trades)
-    nts = pa.no_trade_status(by_magic)
-    risk_halt = pa.risk_halt_status()
+    by_magic = _pa_call("group_by_magic", {}, trades)
+    nts = _pa_call("no_trade_status", [{"bot": "portfolio_analytics", "status": "EXECUTION_ERROR",
+                                        "reason": "runtime dependency failure", "last_trade_time": None,
+                                        "time_since_last_trade_sec": None, "last_heartbeat_age_sec": None}], by_magic)
+    risk_halt = _pa_call("risk_halt_status", {"halted": None, "status": "ERROR",
+                                               "error": "portfolio_analytics runtime failure"})
     shadow = _shadow_view()
     pending_breakout = _pending_breakout_shadow_view()
     pending_signal_runner = _pending_signal_runner_view()
@@ -3990,11 +4058,11 @@ def api_monitor():
     market_context = _monitor_context_view()
     oracle_attr = _get_oracle_attribution()
     cache_age_sec = round(time.time() - cache_ts)
-    bot_health = bot_health_detail(accounts, risk_halt.get("halted", False))
+    bot_health = bot_health_detail(accounts, risk_halt.get("halted") is not False)
     return jsonify({
         "no_trade_status": nts,
         "risk_halt": risk_halt,
-        "asset_exposure": pa.asset_exposure_summary(accounts),
+        "asset_exposure": _pa_call("asset_exposure_summary", {}, accounts),
         "oracle_attribution": oracle_attr,
         "autonomy_challenge": _autonomy_challenge_view(nts),
         "shadow": shadow,
