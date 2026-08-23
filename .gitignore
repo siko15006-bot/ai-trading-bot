@@ -1,0 +1,17 @@
+*.log
+*.db
+*.lock
+*.session
+__pycache__/
+*.pyc
+.env
+config.py
+*credentials*
+*secrets*
+*_state.json
+*heartbeat*.json
+*state.json
+venv/
+*.key
+id_rsa*
+*.pem
