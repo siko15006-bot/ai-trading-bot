@@ -1,0 +1,4 @@
+{
+  "host": "ubuntu@your-oracle-host",
+  "ssh_key": "C:\\Users\\ahmed\\.ssh\\oracle_key"
+}

@@ -15,3 +15,4 @@ venv/
 *.key
 id_rsa*
 *.pem
+windows_bots/status_dashboard.local.json

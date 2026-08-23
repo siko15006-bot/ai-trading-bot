@@ -171,6 +171,7 @@ EMPTY_ORACLE_META = {
     "ladder_state_age_sec": None, "fetched_ts": None,
     "bybit_shield_alive": None, "ladder_guard_alive": None,
     "tg_signal_bot_alive": None, "liquidity_sweep_alive": None,
+    "config_error": None,
 }
 
 _cache = {"accounts": [], "bots": [], "ts": 0, "oracle_meta": dict(EMPTY_ORACLE_META)}
@@ -246,8 +247,39 @@ def _control_equity_by_code(accounts):
             out[code] = a.get("equity")
     return out
 
-ORACLE_SSH_KEY = r"C:\Users\ahmed\Desktop\oracle_key"
-ORACLE_HOST = "ubuntu@<REDACTED_ORACLE_IP>"
+ORACLE_CONFIG_PATH = os.environ.get(
+    "STATUS_DASHBOARD_ORACLE_CONFIG",
+    os.path.join(os.path.dirname(__file__), "status_dashboard.local.json"),
+)
+
+
+def _redacted(value):
+    return isinstance(value, str) and "<REDACTED_" in value
+
+
+def _oracle_config():
+    cfg = {
+        "host": os.environ.get("STATUS_DASHBOARD_ORACLE_HOST"),
+        "ssh_key": os.environ.get("STATUS_DASHBOARD_ORACLE_SSH_KEY"),
+    }
+    if os.path.exists(ORACLE_CONFIG_PATH):
+        with open(ORACLE_CONFIG_PATH, "r", encoding="utf-8") as f:
+            local = json.load(f)
+        for key in ("host", "ssh_key"):
+            if not cfg.get(key) or _redacted(cfg.get(key)):
+                cfg[key] = local.get(key)
+
+    missing = [k for k in ("host", "ssh_key") if not cfg.get(k)]
+    redacted = [k for k in ("host", "ssh_key") if _redacted(cfg.get(k))]
+    if missing or redacted:
+        bad = ", ".join(missing + redacted)
+        raise RuntimeError(f"Oracle config missing/redacted: {bad}")
+    return cfg
+
+
+def deployment_preflight():
+    _oracle_config()
+    return True
 
 def _account_config(code, path):
     """Use the existing live credential source; never store sanitized credentials here."""
@@ -781,9 +813,10 @@ def fetch_oracle():
     # Oracle is unreachable, i.e. exactly when this page matters most.
     # Every return path now uses the same full-shaped dict.
     try:
+        oracle_cfg = _oracle_config()
         result = subprocess.run(
-            ["ssh", "-i", ORACLE_SSH_KEY, "-o", "StrictHostKeyChecking=no",
-             "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", ORACLE_HOST,
+            ["ssh", "-i", oracle_cfg["ssh_key"], "-o", "StrictHostKeyChecking=no",
+             "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", oracle_cfg["host"],
              "cd /home/ubuntu/trading-bot && venv/bin/python3 dashboard_snapshot.py"],
             capture_output=True, text=True, timeout=25, stdin=subprocess.DEVNULL
         )
@@ -817,7 +850,10 @@ def fetch_oracle():
         }
         return data, meta
     except Exception as e:
-        return ({"name": "Oracle (Bybit ccxt)", "error": str(e)}, dict(EMPTY_ORACLE_META))
+        meta = dict(EMPTY_ORACLE_META)
+        if "Oracle config" in str(e):
+            meta["config_error"] = str(e)
+        return ({"name": "Oracle (Bybit ccxt)", "error": str(e)}, meta)
 
 
 def _account_labels(flat_text, marker, count):
@@ -1125,6 +1161,30 @@ def _demo():
     DEPENDENCY_ERRORS.clear()
     DEPENDENCY_ERRORS.update(import_errors)
 
+    orig_config_path = globals()["ORACLE_CONFIG_PATH"]
+    old_env = {k: os.environ.get(k) for k in ("STATUS_DASHBOARD_ORACLE_HOST", "STATUS_DASHBOARD_ORACLE_SSH_KEY")}
+    try:
+        globals()["ORACLE_CONFIG_PATH"] = os.path.join(os.path.dirname(__file__), "__missing_oracle_config.json")
+        os.environ["STATUS_DASHBOARD_ORACLE_HOST"] = "ubuntu@<" + "REDACTED_ORACLE_IP>"
+        os.environ["STATUS_DASHBOARD_ORACLE_SSH_KEY"] = ""
+        oracle_data, oracle_meta = fetch_oracle()
+        assert oracle_data["error"].startswith("Oracle config missing/redacted"), oracle_data
+        assert oracle_meta["config_error"], oracle_meta
+        obs = _observability_model(
+            accounts=[oracle_data], bot_health=[], oracle_meta=dict(oracle_meta, consecutive_failures=1),
+            risk_halt={"halted": False}, no_trade_status=[], shadow=None, pending_breakout=None,
+            pending_signal_runner=None, pending_signal_bridge=None, pending_signal_shadow=None,
+            manual_exit_shadow=None, market_context={"monitors": []}, oracle_attr=None, cache_age_sec=1,
+        )
+        assert any(p["component"] == "Oracle SSH/cache" and p["status"] == "ERROR" for p in obs["problems"]), obs
+    finally:
+        globals()["ORACLE_CONFIG_PATH"] = orig_config_path
+        for k, v in old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
     print("status_dashboard account-label self-check OK")
 
 
@@ -1196,7 +1256,7 @@ def refresh_loop():
         time.sleep(REFRESH_SEC)
 
 
-if "--test" not in sys.argv:
+if "--test" not in sys.argv and "--preflight" not in sys.argv:
     threading.Thread(target=refresh_loop, daemon=True).start()
 
 
@@ -2204,7 +2264,8 @@ def _analytics_prewarm_loop():
         _analytics_prewarm_tick()
 
 
-threading.Thread(target=_analytics_prewarm_loop, daemon=True).start()
+if "--test" not in sys.argv and "--preflight" not in sys.argv:
+    threading.Thread(target=_analytics_prewarm_loop, daemon=True).start()
 
 
 def _build_trade_history_snapshot(raw_trades):
@@ -3984,9 +4045,9 @@ def _observability_model(accounts, bot_health, oracle_meta, risk_halt, no_trade_
     ))
     components["Infrastructure"].append(_component(
         "Oracle SSH/cache", "Infrastructure", "INFRA",
-        "RUNNING" if (oracle_meta.get("consecutive_failures") or 0) == 0 else "STALE",
+        "ERROR" if oracle_meta.get("config_error") else ("RUNNING" if (oracle_meta.get("consecutive_failures") or 0) == 0 else "STALE"),
         f"last success {oracle_meta.get('last_success_ts') or 'never'}", "cache", "Oracle", "ssh",
-        "READ_ONLY", f"failures={oracle_meta.get('consecutive_failures') or 0}",
+        "READ_ONLY", oracle_meta.get("config_error") or f"failures={oracle_meta.get('consecutive_failures') or 0}",
         f"next_retry={oracle_meta.get('next_retry_ts') or 'n/a'}", "Reuse cache; do not add polling", "NO",
     ))
     for m in (market_context or {}).get("monitors", []):
@@ -4084,6 +4145,9 @@ def api_monitor():
 if __name__ == "__main__":
     if "--test" in sys.argv:
         _demo()
+    elif "--preflight" in sys.argv:
+        deployment_preflight()
+        print("status_dashboard deployment preflight OK")
     else:
         # 2026-08-22 (Ahmed reported slow dashboard): Flask's dev server
         # defaults to handling one request at a time. With no threading,
