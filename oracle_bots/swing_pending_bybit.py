@@ -71,6 +71,7 @@ CHECK_INTERVAL = 900
 ORDER_TAG = "swing_pending"
 
 _placed_levels = {}  # (symbol, "high"|"low") -> (price, order_id)
+_adopted_positions = set()  # (symbol, "high"|"low") broker-live position adopted at startup
 LOCK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "swing_pending_bybit.lock")
 _RUN_ID = None
 _LOCK_HELD = False
@@ -191,7 +192,7 @@ def _attribution_evidence(order, symbol=None):
     }
 
 
-def _fetch_open_orders_with_retry(symbol, max_retries=3):
+def _fetch_open_orders_with_retry(symbol, max_retries=3, retry_sleep_sec=5):
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
@@ -201,32 +202,86 @@ def _fetch_open_orders_with_retry(symbol, max_retries=3):
             last_error = str(exc)
             log(f"{symbol} fetch_open_orders attempt {attempt}/{max_retries} failed: {last_error[:180]}")
             if attempt < max_retries:
-                time.sleep(5 * attempt)
+                time.sleep(retry_sleep_sec * attempt)
     return None, last_error
 
 
-def reconcile_on_startup(max_retries=3):
-    """Rebuild `_placed_levels` from Bybit open-order truth only.
+def _fetch_positions_with_retry(symbol, max_retries=3, retry_sleep_sec=5):
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            positions = exchange.fetch_positions([symbol]) or []
+            return positions, None
+        except Exception as exc:
+            last_error = str(exc)
+            log(f"{symbol} fetch_positions attempt {attempt}/{max_retries} failed: {last_error[:180]}")
+            if attempt < max_retries:
+                time.sleep(retry_sleep_sec * attempt)
+    return None, last_error
 
-    0 matches -> leave local state absent for that symbol/side.
-    1 match    -> adopt broker truth.
-    >1 matches -> AMBIGUOUS / CRITICAL / fail closed.
+
+def _position_size(position):
+    info = position.get("info") or {}
+    for key in ("contracts", "size"):
+        value = position.get(key) if key in position else info.get(key)
+        try:
+            if value is not None:
+                return abs(float(value))
+        except Exception:
+            pass
+    return 0.0
+
+
+def _position_side_key(position):
+    info = position.get("info") or {}
+    side = str(position.get("side") or info.get("side") or "").lower()
+    if side in ("long", "buy"):
+        return "low"
+    if side in ("short", "sell"):
+        return "high"
+    return None
+
+
+def reconcile_on_startup(max_retries=3, retry_sleep_sec=5):
+    """Rebuild startup state from Bybit broker truth only.
+
+    0 matches          -> leave local state absent for that symbol/side.
+    1 order match      -> adopt pending order truth.
+    1 position match   -> adopt live position truth and block same-side pending.
+    conflicting matches -> AMBIGUOUS / CRITICAL / fail closed.
     """
-    global _placed_levels
+    global _placed_levels, _adopted_positions
     startup_ts = datetime.now(timezone.utc)
     local_before = {f"{sym}:{side}": price for (sym, side), (price, _oid) in _placed_levels.items()}
     reconciled = {}
+    adopted_positions = set()
     broker_matches = {}
     attribution_evidence = []
 
     for symbol in SYMBOLS:
-        orders, err = _fetch_open_orders_with_retry(symbol, max_retries=max_retries)
+        orders, err = _fetch_open_orders_with_retry(symbol, max_retries=max_retries, retry_sleep_sec=retry_sleep_sec)
         if orders is None:
             report = {
                 "startup_id": _RUN_ID,
                 "timestamp": startup_ts.isoformat(),
                 "status": "CRITICAL",
                 "mismatch_reason": "fetch_open_orders_failed",
+                "symbol": symbol,
+                "local_before": local_before,
+                "reconciled_after": {},
+                "broker_matches": broker_matches,
+                "attribution_evidence": attribution_evidence,
+                "error": err,
+            }
+            log(f"{symbol} startup reconciliation failed: {json.dumps(report, ensure_ascii=False, default=str)}")
+            return False, report
+        positions, err = _fetch_positions_with_retry(symbol, max_retries=max_retries, retry_sleep_sec=retry_sleep_sec)
+        if positions is None:
+            report = {
+                "startup_id": _RUN_ID,
+                "timestamp": startup_ts.isoformat(),
+                "status": "CRITICAL",
+                "mismatch_reason": "fetch_positions_failed",
                 "symbol": symbol,
                 "local_before": local_before,
                 "reconciled_after": {},
@@ -256,8 +311,54 @@ def reconcile_on_startup(max_retries=3):
             broker_matches[symbol]["total"] += 1
             attribution_evidence.append(evidence)
 
+        for position in positions:
+            if (position.get("symbol") or symbol) != symbol or _position_size(position) <= 0:
+                continue
+            side = _position_side_key(position)
+            if side is None:
+                report = {
+                    "startup_id": _RUN_ID,
+                    "timestamp": startup_ts.isoformat(),
+                    "status": "AMBIGUOUS / CRITICAL",
+                    "mismatch_reason": f"position_side_unknown:{symbol}",
+                    "symbol": symbol,
+                    "local_before": local_before,
+                    "reconciled_after": {},
+                    "broker_matches": broker_matches,
+                    "attribution_evidence": attribution_evidence,
+                    "error": None,
+                }
+                log(f"{symbol} startup reconciliation failed: {json.dumps(report, ensure_ascii=False, default=str)}")
+                return False, report
+            broker_matches.setdefault(symbol, {"low": [], "high": [], "positions": {"low": [], "high": []}, "total": 0})
+            broker_matches[symbol].setdefault("positions", {"low": [], "high": []})
+            broker_matches[symbol]["positions"][side].append({
+                "position_id": position.get("id") or (position.get("info") or {}).get("positionIdx"),
+                "side": position.get("side") or (position.get("info") or {}).get("side"),
+                "contracts": _position_size(position),
+                "entryPrice": position.get("entryPrice") or (position.get("info") or {}).get("avgPrice"),
+            })
+            broker_matches[symbol]["total"] += 1
+
         for side in ("low", "high"):
+            key = (symbol, side)
             matches = broker_matches.get(symbol, {}).get(side, [])
+            pos_matches = broker_matches.get(symbol, {}).get("positions", {}).get(side, [])
+            if matches and pos_matches:
+                report = {
+                    "startup_id": _RUN_ID,
+                    "timestamp": startup_ts.isoformat(),
+                    "status": "AMBIGUOUS / CRITICAL",
+                    "mismatch_reason": f"order_and_position_match:{symbol}:{side}",
+                    "symbol": symbol,
+                    "local_before": local_before,
+                    "reconciled_after": {},
+                    "broker_matches": broker_matches,
+                    "attribution_evidence": attribution_evidence,
+                    "error": None,
+                }
+                log(f"{symbol} startup reconciliation failed: {json.dumps(report, ensure_ascii=False, default=str)}")
+                return False, report
             if len(matches) > 1:
                 report = {
                     "startup_id": _RUN_ID,
@@ -273,13 +374,32 @@ def reconcile_on_startup(max_retries=3):
                 }
                 log(f"{symbol} startup reconciliation failed: {json.dumps(report, ensure_ascii=False, default=str)}")
                 return False, report
+            if len(pos_matches) > 1:
+                report = {
+                    "startup_id": _RUN_ID,
+                    "timestamp": startup_ts.isoformat(),
+                    "status": "AMBIGUOUS / CRITICAL",
+                    "mismatch_reason": f"multiple_position_matches:{symbol}:{side}",
+                    "symbol": symbol,
+                    "local_before": local_before,
+                    "reconciled_after": {},
+                    "broker_matches": broker_matches,
+                    "attribution_evidence": attribution_evidence,
+                    "error": None,
+                }
+                log(f"{symbol} startup reconciliation failed: {json.dumps(report, ensure_ascii=False, default=str)}")
+                return False, report
             if len(matches) == 1:
                 match = matches[0]
                 reconciled[key] = (float(match["price"]), match["order_id"])
+            elif len(pos_matches) == 1:
+                adopted_positions.add(key)
 
     local_before_report = dict(local_before)
     after_report = {f"{sym}:{side}": price for (sym, side), (price, _oid) in reconciled.items()}
+    adopted_report = [f"{sym}:{side}" for (sym, side) in sorted(adopted_positions)]
     _placed_levels = reconciled
+    _adopted_positions = adopted_positions
     report = {
         "startup_id": _RUN_ID,
         "timestamp": startup_ts.isoformat(),
@@ -287,6 +407,7 @@ def reconcile_on_startup(max_retries=3):
         "mismatch_reason": None,
         "local_before": local_before_report,
         "reconciled_after": after_report,
+        "adopted_positions": adopted_report,
         "broker_matches": broker_matches,
         "attribution_evidence": attribution_evidence,
         "error": None,
@@ -298,6 +419,7 @@ def reconcile_on_startup(max_retries=3):
                         status=report["status"],
                         local_before=len(local_before_report),
                         reconciled_after=len(after_report),
+                        adopted_positions=len(adopted_report),
                         broker_matches=sum(v["total"] for v in broker_matches.values()),
                         mismatch_reason=None)
     except Exception:
@@ -368,6 +490,10 @@ def _existing_order_ok(symbol, order_id):
 
 def _place_or_replace(symbol, side, level, atr):
     """side: 'low' (buy limit at swing low) or 'high' (sell limit at swing high)."""
+    key = (symbol, side)
+    if key in _adopted_positions:
+        log(f"{symbol} {side} skipped -- broker position adopted at startup")
+        return
     freeze = entry_freeze_status("swing_pending_bybit", account="BAA")
     if freeze.get("frozen"):
         log(f"{symbol} {side} ENTRY BLOCKED -- freeze active ({freeze.get('reason')})")
@@ -378,7 +504,6 @@ def _place_or_replace(symbol, side, level, atr):
         # replaced), only a brand-new order would count as a new entry
         log(f"{symbol} {side} ENTRY BLOCKED -- portfolio-wide RISK_HALT active (synced from Windows)")
         return
-    key = (symbol, side)
     price = float(exchange.price_to_precision(symbol, level))
     try:
         ticker = exchange.fetch_ticker(symbol)
@@ -452,7 +577,7 @@ def _demo():
     ATR math, no-place-through-live-price, and no-duplicate-replace logic,
     without touching the real exchange. Mirrors swing_pending_bot.py's
     (MT5) self-check suite so both ports stay verifiably in sync."""
-    global exchange, _RUN_ID, _LOCK_HELD, LOCK_PATH
+    global exchange, _RUN_ID, _LOCK_HELD, LOCK_PATH, _adopted_positions, is_portfolio_halted
     sent = []
 
     open_ids = set()
@@ -479,14 +604,22 @@ def _demo():
             return {"id": oid}
 
     class ReconcileExchange:
-        def __init__(self, orders, fail=False):
+        def __init__(self, orders, positions=None, fail=False, fail_positions=False):
             self.orders = orders
+            self.positions = positions or {}
             self.fail = fail
+            self.fail_positions = fail_positions
 
         def fetch_open_orders(self, symbol):
             if self.fail:
                 raise RuntimeError("boom")
             return [o for o in self.orders.get(symbol, [])]
+
+        def fetch_positions(self, symbols):
+            if self.fail_positions:
+                raise RuntimeError("positions boom")
+            wanted = set(symbols or [])
+            return [p for sym, rows in self.positions.items() if not wanted or sym in wanted for p in rows]
 
         def create_order(self, *a, **k):
             raise AssertionError("reconcile tests must not create orders")
@@ -497,6 +630,8 @@ def _demo():
     exchange = FakeExchange()
     QTY["TEST"] = 0.01
     _placed_levels.clear()
+    halt_hook = is_portfolio_halted
+    is_portfolio_halted = lambda: False
 
     def make_ohlcv(rows):
         return [[i, r[2], r[0], r[1], r[2], 0] for i, r in enumerate(rows)]  # ts,o,h,l,c,v order fixed below
@@ -588,28 +723,45 @@ def _demo():
     # --- reconcile_on_startup: no orders => success, state absent ---
     import tempfile
     old_lock, old_run_id, old_lock_held = LOCK_PATH, _RUN_ID, _LOCK_HELD
+    old_log = globals()["log"]
+    globals()["log"] = lambda _msg: None
     with tempfile.TemporaryDirectory() as td:
         LOCK_PATH = os.path.join(td, "swing_pending_bybit.lock")
         _RUN_ID = "test-run"
         _LOCK_HELD = False
         exchange = ReconcileExchange({sym: [] for sym in SYMBOLS})
         _placed_levels.clear()
+        _adopted_positions.clear()
         ok, report = reconcile_on_startup()
         assert ok and report["status"] == "SUCCESS"
         assert _placed_levels == {}
         assert report["reconciled_after"] == {}
+        assert report["adopted_positions"] == []
         print("swing_pending_bybit reconcile no-order self-check: OK")
 
         # one matching order => adopt broker truth, no create/cancel
         order = {"id": "ord-1", "side": "buy", "price": 111.11, "clientOrderId": "swing_pending-BTC-low-1", "timestamp": 1111111111}
         exchange = ReconcileExchange({"BTC/USDT:USDT": [order]})
         _placed_levels.clear()
+        _adopted_positions.clear()
         ok, report = reconcile_on_startup()
         assert ok and _placed_levels == {("BTC/USDT:USDT", "low"): (111.11, "ord-1")}
+        assert _adopted_positions == set()
         assert report["reconciled_after"] == {"BTC/USDT:USDT:low": 111.11}
         assert report["attribution_evidence"][0]["symbol"] == "BTC/USDT:USDT"
         assert report["attribution_evidence"][0]["timestamp"] is not None
         print("swing_pending_bybit reconcile one-match self-check: OK")
+
+        # one matching position => adopt broker truth and block same-side pending
+        pos = {"id": "pos-1", "symbol": "BTC/USDT:USDT", "side": "long", "contracts": 0.001, "entryPrice": 111.11}
+        exchange = ReconcileExchange({"BTC/USDT:USDT": []}, {"BTC/USDT:USDT": [pos]})
+        _placed_levels.clear()
+        _adopted_positions.clear()
+        ok, report = reconcile_on_startup()
+        assert ok and _placed_levels == {}, report
+        assert _adopted_positions == {("BTC/USDT:USDT", "low")}, _adopted_positions
+        assert report["adopted_positions"] == ["BTC/USDT:USDT:low"], report
+        print("swing_pending_bybit reconcile one-position self-check: OK")
 
         # multiple matching orders => fail closed, local state unchanged
         exchange = ReconcileExchange({"BTC/USDT:USDT": [
@@ -617,15 +769,29 @@ def _demo():
             {"id": "ord-b", "side": "buy", "price": 112.22, "clientOrderId": "swing_pending-BTC-low-b", "timestamp": 1111111112},
         ]})
         _placed_levels.clear()
+        _adopted_positions.clear()
         ok, report = reconcile_on_startup()
         assert not ok and report["status"] == "AMBIGUOUS / CRITICAL"
         assert _placed_levels == {}
         print("swing_pending_bybit reconcile multiple-match self-check: OK")
 
+        # partial mismatch: same symbol/side has both order and position => fail closed
+        exchange = ReconcileExchange(
+            {"BTC/USDT:USDT": [order]},
+            {"BTC/USDT:USDT": [pos]},
+        )
+        _placed_levels.clear()
+        _adopted_positions.clear()
+        ok, report = reconcile_on_startup()
+        assert not ok and report["mismatch_reason"] == "order_and_position_match:BTC/USDT:USDT:low", report
+        assert _placed_levels == {} and _adopted_positions == set()
+        print("swing_pending_bybit reconcile partial-mismatch self-check: OK")
+
         # retry failure => fail closed
         exchange = ReconcileExchange({"BTC/USDT:USDT": []}, fail=True)
         _placed_levels.clear()
-        ok, report = reconcile_on_startup(max_retries=2)
+        _adopted_positions.clear()
+        ok, report = reconcile_on_startup(max_retries=2, retry_sleep_sec=0)
         assert not ok and report["status"] == "CRITICAL"
         assert report["mismatch_reason"] == "fetch_open_orders_failed"
         print("swing_pending_bybit reconcile fetch-failure self-check: OK")
@@ -635,31 +801,40 @@ def _demo():
             {"id": "ord-z", "side": "sell", "price": 222.22, "orderLinkId": "swing_pending-ETH-high-9", "timestamp": 2222222222},
         ]})
         _placed_levels.clear()
+        _adopted_positions.clear()
         ok1, report1 = reconcile_on_startup()
         ok2, report2 = reconcile_on_startup()
         assert ok1 and ok2 and report1["reconciled_after"] == report2["reconciled_after"] == {"ETH/USDT:USDT:high": 222.22}
         print("swing_pending_bybit reconcile idempotency self-check: OK")
 
+        # stale local state vs flat broker truth => broker truth wins, local state cleared
+        exchange = ReconcileExchange({sym: [] for sym in SYMBOLS})
+        _placed_levels.clear()
+        _placed_levels[("BTC/USDT:USDT", "low")] = (999.0, "stale-local")
+        _adopted_positions.clear()
+        _adopted_positions.add(("ETH/USDT:USDT", "high"))
+        ok, report = reconcile_on_startup()
+        assert ok and _placed_levels == {} and _adopted_positions == set(), report
+        assert report["local_before"] == {"BTC/USDT:USDT:low": 999.0}, report
+        assert report["reconciled_after"] == {} and report["adopted_positions"] == [], report
+        print("swing_pending_bybit reconcile stale-local-state self-check: OK")
+
     LOCK_PATH, _RUN_ID, _LOCK_HELD = old_lock, old_run_id, old_lock_held
+    globals()["log"] = old_log
 
-    # --- lock tests ---
-    import tempfile
-    with tempfile.TemporaryDirectory() as td:
-        LOCK_PATH = os.path.join(td, "swing_pending_bybit.lock")
-        _RUN_ID = "lock-test"
-        _LOCK_HELD = False
-        with open(LOCK_PATH, "w", encoding="utf-8") as f:
-            json.dump({"pid": os.getpid(), "started_at_utc": "now", "run_id": "same"}, f)
-        ok, report = _acquire_single_instance_lock()
-        assert not ok and report["status"] == "LOCKED"
-        print("swing_pending_bybit duplicate-lock self-check: OK")
-
-        with open(LOCK_PATH, "w", encoding="utf-8") as f:
-            json.dump({"pid": 99999999, "started_at_utc": "old", "run_id": "dead"}, f)
-        ok, report = _acquire_single_instance_lock()
-        assert ok and report["status"] == "LOCK_ACQUIRED"
-        _release_single_instance_lock()
-        print("swing_pending_bybit stale-lock recovery self-check: OK")
+    # adopted live position must suppress duplicate pending placement without exchange calls
+    def _must_not_touch_exchange(*a, **k):
+        raise AssertionError("adopted position must suppress duplicate pending before exchange access")
+    exchange = FakeExchange()
+    exchange.price_to_precision = _must_not_touch_exchange
+    _adopted_positions.clear()
+    _adopted_positions.add(("TEST", "low"))
+    sent.clear()
+    _place_or_replace("TEST", "low", 1.10, atr)
+    assert not sent
+    _adopted_positions.clear()
+    print("swing_pending_bybit adopted-position duplicate-suppression self-check: OK")
+    is_portfolio_halted = halt_hook
 
     LOCK_PATH, _RUN_ID, _LOCK_HELD = old_lock, old_run_id, old_lock_held
 
