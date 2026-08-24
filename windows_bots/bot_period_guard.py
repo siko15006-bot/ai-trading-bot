@@ -11,7 +11,27 @@ import msvcrt
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "research_ml"))
-import state_io  # noqa: E402
+try:
+    import state_io  # noqa: E402
+except ModuleNotFoundError:
+    class state_io:
+        @staticmethod
+        def read_json_safe(path, default=None):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    return __import__("json").load(f)
+            except Exception:
+                return default
+
+        @staticmethod
+        def atomic_write_json(path, data):
+            json = __import__("json")
+            path = Path(path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = Path(str(path) + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, sort_keys=True)
+            tmp.replace(path)
 
 
 DAILY_LOSS_PCT = 2.0

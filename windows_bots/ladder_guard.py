@@ -41,9 +41,9 @@ ACCOUNTS = {
     # and silently watched the wrong account (ea_shield incident 2026-07-06)
     "BA": dict(path=r"C:\Program Files\MetaTrader 5\terminal64.exe"),
     "EA": dict(path=r"C:\MT5_Portable_2\terminal64.exe",
-               login=<REDACTED_MT5_LOGIN_EA>, password="<REDACTED_MT5_PASSWORD_EA>", server="Exness-MT5Real33"),
+               login=None, password="<REDACTED_MT5_PASSWORD_EA>", server="Exness-MT5Real33"),
     "EM": dict(path=r"C:\MT5_Portable_3\terminal64.exe",
-               login=<REDACTED_MT5_LOGIN_EM>, password="<REDACTED_MT5_PASSWORD_EM>", server="Exness-MT5Real35"),
+               login=None, password="<REDACTED_MT5_PASSWORD_EM>", server="Exness-MT5Real35"),
 }
 
 # --- V2 asset-class-aware ladder (2026-07-28) --------------------------------
