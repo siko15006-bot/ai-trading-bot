@@ -15,8 +15,8 @@ Generated: 2026-08-24
 
 ## Local UI Proof
 
-- `/monitor`: HTTP 200, 38994 bytes, 13494.9 ms cold/warm mixed test-client request.
-- `/api/monitor`: HTTP 200, 23292 bytes, 726.6 ms warm test-client request.
+- `/monitor`: HTTP 200, 42275 bytes, 1128.6 ms test-client request.
+- `/api/monitor`: HTTP 200, 21983 bytes, 797.0 ms warm test-client request.
 - P0 command strip payload keys:
   `ai`, `correlated_warnings`, `counts`, `data_source_map`, `exposure`, `feed`, `health`, `portfolio`, `risk`.
 
@@ -65,9 +65,9 @@ Generated: 2026-08-24
 
 ## Secrets Safety
 
-- Removed invalid redacted Python placeholders from `portfolio_analytics.py`.
-- EA/EM optional account credentials now come only from environment variables:
-  `MT5_LOGIN_EA`, `MT5_PASSWORD_EA`, `MT5_LOGIN_EM`, `MT5_PASSWORD_EM`.
+- Removed invalid redacted Python placeholders from `ladder_guard.py`.
+- Runtime account credentials remain in the approved live config/env sources;
+  no secret values are committed.
 - No secrets added.
 
 ## Deploy Status
@@ -81,9 +81,9 @@ Generated: 2026-08-24
 - `$300` is rendered as first milestone/completed when eligible live equity is at least `$300`.
 - `$500` is rendered as the active target.
 - Current eligible equity is summed from live dashboard `accounts` cache only.
-- Included accounts in live proof: Bybit MT5 `$133.02`, E2/EA `$120.57`, Oracle/BAA `$69.24`.
+- Included accounts in live proof: Bybit MT5 `$135.95`, E2/EA `$74.85`, Oracle/BAA `$69.24`.
 - Excluded accounts in live proof: E1/EM, reason `EM/E1 read-only execution policy`.
-- Live proof values with runtime challenge baseline `198.62`: eligible equity `$322.83`, remaining `$177.17`, progress `41.2%`, profit from baseline `$124.21`, peak `$322.83`, current drawdown `0.0%`.
+- Live proof values: eligible equity `$280.04`, remaining `$219.96`, progress `0.0%`, peak `$280.04`, current drawdown `0.0%`.
 - Visualization includes `START -> $300 -> $350 -> $400 -> $450 -> $500`.
 - Removed the old visible 7-day challenge/deadline block from `/monitor`; legacy API field remains for compatibility.
 - No deploy performed.
