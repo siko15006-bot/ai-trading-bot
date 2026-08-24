@@ -1358,6 +1358,17 @@ def _demo():
     assert p0["portfolio"]["realized_today"] == 2, p0
     assert p0["risk"]["protection"] == "OK", p0
     assert "health_score_deductions_root_cause" in p0["data_source_map"], p0
+    road = _road_to_500_view([
+        {"name": "Bybit MT5", "equity": 125.0},
+        {"name": "E2 (Exness)", "equity": 150.0},
+        {"name": "Oracle (Bybit ccxt)", "equity": 50.0},
+        {"name": "E1 (Exness)", "equity": 42.0},
+        {"name": "broken", "error": "offline"},
+    ])
+    assert road["current_equity"] == 325.0, road
+    assert road["target_300_completed"] is True, road
+    assert road["remaining_to_500"] == 175.0, road
+    assert any(a["name"].startswith("E1") for a in road["excluded_accounts"]), road
 
     orig_config_path = globals()["ORACLE_CONFIG_PATH"]
     old_env = {k: os.environ.get(k) for k in ("STATUS_DASHBOARD_ORACLE_HOST", "STATUS_DASHBOARD_ORACLE_SSH_KEY")}
@@ -3502,6 +3513,25 @@ td{padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
 .p0-band{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}
 .p0-chip{display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:5px 9px;background:rgba(255,255,255,.055);border:1px solid rgba(148,163,184,.18);font-size:12px;font-weight:800}
 .p0-chip.good{color:var(--good);background:var(--good-bg)} .p0-chip.warn{color:var(--warn);background:var(--warn-bg)} .p0-chip.bad{color:var(--bad);background:var(--bad-bg)}
+.road-card{background:linear-gradient(160deg,#111827,#10151f 55%,#0d1117);border:1px solid #273245;border-radius:22px;padding:14px;margin-bottom:14px;box-shadow:0 14px 40px rgba(0,0,0,.2)}
+.road-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:12px}
+.road-title{font-size:18px;font-weight:950;letter-spacing:.2px}
+.road-target{font-size:12px;color:#93a4b8;margin-top:3px}
+.road-money{font-size:30px;font-weight:950;line-height:1}
+.road-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+@media (min-width:760px){.road-grid{grid-template-columns:repeat(6,1fr)}}
+.road-cell{background:rgba(255,255,255,.045);border:1px solid rgba(148,163,184,.18);border-radius:14px;padding:10px;min-width:0}
+.road-label{font-size:10.5px;color:#91a0b4;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.road-value{font-size:16px;font-weight:900;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.road-track{position:relative;height:42px;margin:16px 4px 8px;background:rgba(255,255,255,.06);border-radius:999px;border:1px solid rgba(148,163,184,.2)}
+.road-fill{height:100%;border-radius:999px;background:linear-gradient(90deg,#2563eb,#22c55e);width:{{ road_to_500.progress_pct }}%}
+.road-mark{position:absolute;top:50%;transform:translate(-50%,-50%);text-align:center;min-width:48px}
+.road-dot{width:14px;height:14px;border-radius:50%;margin:0 auto 3px;border:2px solid #94a3b8;background:#111827}
+.road-mark.done .road-dot{background:var(--good);border-color:var(--good)} .road-mark.active .road-dot{background:var(--wait);border-color:var(--wait)}
+.road-mark span{font-size:10.5px;font-weight:900;color:#cbd5e1;background:#111827;border:1px solid rgba(148,163,184,.24);border-radius:999px;padding:2px 5px}
+.road-accounts{display:grid;grid-template-columns:1fr;gap:8px;margin-top:12px}
+@media (min-width:760px){.road-accounts{grid-template-columns:1fr 1fr}}
+.road-list{background:rgba(255,255,255,.035);border:1px solid rgba(148,163,184,.16);border-radius:14px;padding:10px}
 </style></head><body>
 <div class="nav"><a href="/">🏠 Dashboard</a><a href="/analytics">📊 Analytics</a><a href="/risk">⚠️ Risk</a><a href="/reports">📄 Reports</a><a href="/trades">📜 Trades</a><a href="/monitor" class="active">🖥️ Monitor</a></div>
 <h1>🖥️ Monitor (Read-Only)</h1>
@@ -3555,6 +3585,51 @@ td{padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
   {% if p0.correlated_warnings %}
   <div class="p0-band">{% for w in p0.correlated_warnings %}<span class="p0-chip warn">{{ w }}</span>{% endfor %}</div>
   {% endif %}
+</div>
+
+<div class="road-card">
+  <div class="road-head">
+    <div>
+      <div class="road-title">ROAD TO $500</div>
+      <div class="road-target">$300 milestone {{ 'completed' if road_to_500.target_300_completed else 'pending' }} · Active target ${{ '%.0f'|format(road_to_500.active_target) }} · display only, no risk change</div>
+    </div>
+    <div style="text-align:right">
+      <div class="road-money">${{ '%.2f'|format(road_to_500.current_equity) }}</div>
+      <div class="p0-mini">eligible live equity</div>
+    </div>
+  </div>
+  <div class="road-grid">
+    <div class="road-cell"><div class="road-label">Current Eligible Equity</div><div class="road-value">${{ '%.2f'|format(road_to_500.current_equity) }}</div></div>
+    <div class="road-cell"><div class="road-label">Remaining to $500</div><div class="road-value">${{ '%.2f'|format(road_to_500.remaining_to_500) }}</div></div>
+    <div class="road-cell"><div class="road-label">Progress</div><div class="road-value">{{ '%.1f'|format(road_to_500.progress_pct) }}%</div></div>
+    <div class="road-cell"><div class="road-label">Profit from Baseline</div><div class="road-value {{ 'p0-good' if road_to_500.profit_from_baseline >= 0 else 'p0-bad' }}">{{ '%+.2f'|format(road_to_500.profit_from_baseline) }}</div><div class="p0-mini">baseline ${{ '%.2f'|format(road_to_500.baseline) }}</div></div>
+    <div class="road-cell"><div class="road-label">Peak Equity</div><div class="road-value">${{ '%.2f'|format(road_to_500.peak_equity) }}</div></div>
+    <div class="road-cell"><div class="road-label">Current Drawdown</div><div class="road-value">{{ '%.2f'|format(road_to_500.current_drawdown_pct) }}%</div></div>
+  </div>
+  <div class="road-track" aria-label="Road to 500 progress">
+    <div class="road-fill"></div>
+    {% for m in road_to_500.milestones %}
+    <div class="road-mark {{ 'done' if m.status == 'completed' else ('active' if m.status == 'active' else '') }}" style="left:{{ m.left_pct }}%">
+      <div class="road-dot"></div><span>{{ m.label }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  <div class="road-accounts">
+    <div class="road-list">
+      <b>Included</b>
+      {% for a in road_to_500.included_accounts %}
+      <div class="row"><span>{{ a.name }}</span><span>${{ '%.2f'|format(a.equity) }}</span></div>
+      {% endfor %}
+      {% if not road_to_500.included_accounts %}<div class="na">No eligible accounts available.</div>{% endif %}
+    </div>
+    <div class="road-list">
+      <b>Excluded</b>
+      {% for a in road_to_500.excluded_accounts %}
+      <div class="row"><span>{{ a.name }}</span><span>{{ a.reason }}</span></div>
+      {% endfor %}
+      {% if not road_to_500.excluded_accounts %}<div class="na">No excluded accounts.</div>{% endif %}
+    </div>
+  </div>
 </div>
 
 <h2>🧭 FULL-DETAIL OBSERVABILITY</h2>
@@ -3625,39 +3700,6 @@ td{padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
   </table></div>
 </div>
 {% endfor %}
-
-{% if autonomy_challenge %}
-<h2>🔥 7-DAY AUTONOMY CHALLENGE</h2>
-<div class="card row">
-  <span>Status</span>
-  <span class="badge {{ 'b-good' if autonomy_challenge.status=='ACTIVE' else 'b-muted' }}">{{ autonomy_challenge.status }}</span>
-</div>
-<div class="summary-grid">
-  <div class="summary-cell"><div class="sc-label">START</div><div class="sc-value">${{ '%.2f'|format(autonomy_challenge.starting_equity) }}</div></div>
-  <div class="summary-cell"><div class="sc-label">CURRENT</div><div class="sc-value">${{ '%.2f'|format(autonomy_challenge.current_equity) }}</div></div>
-  <div class="summary-cell"><div class="sc-label">TARGET</div><div class="sc-value">${{ '%.0f'|format(autonomy_challenge.target_equity) }}</div></div>
-  <div class="summary-cell"><div class="sc-label">P/L</div><div class="sc-value" style="color:{{ 'var(--good)' if autonomy_challenge.net_pnl >= 0 else 'var(--bad)' }}">{{ '%+.2f'|format(autonomy_challenge.net_pnl) }}</div></div>
-  <div class="summary-cell"><div class="sc-label">RETURN</div><div class="sc-value">{{ '%+.2f'|format(autonomy_challenge.return_pct) }}%</div></div>
-  <div class="summary-cell"><div class="sc-label">PEAK</div><div class="sc-value">${{ '%.2f'|format(autonomy_challenge.peak_equity) }}</div></div>
-  <div class="summary-cell"><div class="sc-label">MAX DD</div><div class="sc-value">{{ '%.2f'|format(autonomy_challenge.max_drawdown_pct) }}%</div></div>
-  <div class="summary-cell"><div class="sc-label">TRADES</div><div class="sc-value">{{ autonomy_challenge.total_trades }} ({{ autonomy_challenge.wins }}W/{{ autonomy_challenge.losses }}L)</div></div>
-  <div class="summary-cell"><div class="sc-label">BOT HEALTH</div><div class="sc-value">{{ autonomy_challenge.bot_health }}</div></div>
-  <div class="summary-cell"><div class="sc-label">RISK_HALT</div><div class="sc-value">{{ autonomy_challenge.risk_halt_events }} event(s)</div></div>
-  <div class="summary-cell"><div class="sc-label">TIME REMAINING</div><div class="sc-value">{{ autonomy_challenge.time_remaining }}</div></div>
-  <div class="summary-cell"><div class="sc-label">OPEN POS</div><div class="sc-value">{{ open_positions|length }}</div></div>
-  <!-- 2026-08-19 dashboard patch: was autonomy_challenge.open_positions (a frozen field
-       persisted by the now-completed challenge state file) -- now reads the SAME live
-       open_positions list the Trade Center table below already renders, so this number
-       and that table can never disagree again. autonomy_challenge.py itself untouched. -->
-</div>
-<div class="card">
-  <div class="sc-label" style="margin-bottom:6px">Progress toward $300 target (display/measurement only — zero trading logic tied to this)</div>
-  <div style="background:var(--card2);border-radius:8px;height:14px;overflow:hidden">
-    <div style="background:var(--wait);height:100%;width:{{ autonomy_challenge.progress_pct }}%"></div>
-  </div>
-  <div style="font-size:11px;color:var(--muted);margin-top:4px">{{ '%.1f'|format(autonomy_challenge.progress_pct) }}% · started {{ autonomy_challenge.start_timestamp_utc }} · ends {{ autonomy_challenge.end_timestamp_utc }}</div>
-</div>
-{% endif %}
 
 {% if shadow %}
 <h2>🌓 SHADOW TRADES <span style="font-size:12px;color:var(--muted)">(risk-free measurement — zero live execution)</span></h2>
@@ -3959,6 +4001,66 @@ def _autonomy_challenge_view(no_trade_status_list):
     return view
 
 
+def _road_to_500_view(accounts):
+    """Read-only display model. Current equity is always from live dashboard accounts;
+    the old challenge state is used only for baseline/peak continuity."""
+    try:
+        state = achall.read_state() or {}
+    except Exception as e:
+        _dependency_failed("autonomy_challenge.runtime", e)
+        state = {}
+
+    included, excluded = [], []
+    for acc in accounts:
+        name = acc.get("name", "UNKNOWN")
+        if acc.get("error"):
+            excluded.append({"name": name, "reason": acc.get("error")})
+            continue
+        if name.startswith("E1") or name.startswith("EM"):
+            excluded.append({"name": name, "reason": "EM/E1 read-only execution policy"})
+            continue
+        equity = acc.get("equity")
+        if equity is None:
+            excluded.append({"name": name, "reason": "equity unavailable"})
+            continue
+        included.append({"name": name, "equity": round(equity or 0.0, 2)})
+
+    current = round(sum(a["equity"] for a in included), 2)
+    baseline = state.get("starting_equity")
+    if baseline is None:
+        baseline = current
+    peak = round(max(state.get("peak_equity") or current, current), 2)
+    target = 500.0
+    span = max(target - baseline, 1)
+    progress = max(0.0, min(100.0, (current - baseline) / span * 100))
+    drawdown = round((peak - current) / peak * 100, 2) if peak > 0 else 0.0
+    milestones = [baseline, 300.0, 350.0, 400.0, 450.0, 500.0]
+    labels = ["START", "$300", "$350", "$400", "$450", "$500"]
+    points = []
+    visual_span = max(target - baseline, 1)
+    for value, label in zip(milestones, labels):
+        points.append({
+            "label": label,
+            "value": round(value, 2),
+            "left_pct": max(0.0, min(100.0, (value - baseline) / visual_span * 100)),
+            "status": "completed" if current >= value else ("active" if value == target else "pending"),
+        })
+    return {
+        "current_equity": current,
+        "remaining_to_500": round(max(0.0, target - current), 2),
+        "progress_pct": round(progress, 1),
+        "profit_from_baseline": round(current - baseline, 2),
+        "baseline": round(baseline, 2),
+        "peak_equity": peak,
+        "current_drawdown_pct": drawdown,
+        "target_300_completed": current >= 300.0,
+        "active_target": target,
+        "included_accounts": included,
+        "excluded_accounts": excluded,
+        "milestones": points,
+    }
+
+
 def _source_from_strategy_string(strategy):
     """Derives BOT/TELEGRAM/MANUAL/UNKNOWN from the strategy label
     normalize_mt5_position()/normalize_baa_position() already computed
@@ -4162,6 +4264,7 @@ def monitor_page():
         cache_age_sec=round(time.time() - _cache.get("ts", time.time())),
         trade_cache_age_sec=round(time.time() - cache_30d_ts),
     )
+    road_to_500 = _road_to_500_view(accounts)
     return render_template_string(
         MONITOR_PAGE,
         trades_today=trades_today, trades_week=trades_week, open_positions=open_positions,
@@ -4180,6 +4283,7 @@ def monitor_page():
         observability=observability,
         ai_status=ai_status,
         p0=p0,
+        road_to_500=road_to_500,
         mt5_errors=mt5_errors, cache_age_sec=cache_age_sec,
     )
 
@@ -4584,8 +4688,10 @@ def api_monitor():
         cache_age_sec=round(time.time() - _cache.get("ts", time.time())),
         trade_cache_age_sec=round(time.time() - cache_30d_ts),
     )
+    road_to_500 = _road_to_500_view(accounts)
     return jsonify({
         "p0_command_strip": p0,
+        "road_to_500": road_to_500,
         "p0_data_source_map": p0["data_source_map"],
         "no_trade_status": nts,
         "risk_halt": risk_halt,

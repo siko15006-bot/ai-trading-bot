@@ -74,3 +74,16 @@ Generated: 2026-08-24
 
 - Not deployed.
 - ChatGPT review required before deploy.
+
+## Road To $500 Addendum
+
+- Added `/monitor` ROAD TO `$500` card and `/api/monitor.road_to_500`.
+- `$300` is rendered as first milestone/completed when eligible live equity is at least `$300`.
+- `$500` is rendered as the active target.
+- Current eligible equity is summed from live dashboard `accounts` cache only.
+- Included accounts in live proof: Bybit MT5 `$133.02`, E2/EA `$120.57`, Oracle/BAA `$69.24`.
+- Excluded accounts in live proof: E1/EM, reason `EM/E1 read-only execution policy`.
+- Live proof values with runtime challenge baseline `198.62`: eligible equity `$322.83`, remaining `$177.17`, progress `41.2%`, profit from baseline `$124.21`, peak `$322.83`, current drawdown `0.0%`.
+- Visualization includes `START -> $300 -> $350 -> $400 -> $450 -> $500`.
+- Removed the old visible 7-day challenge/deadline block from `/monitor`; legacy API field remains for compatibility.
+- No deploy performed.
