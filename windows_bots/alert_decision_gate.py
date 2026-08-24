@@ -43,11 +43,7 @@ DECISIONS_LOG = os.path.join(BASE_DIR, "alert_decisions.jsonl")
 RANGE_WINDOWS_HOURS = (6, 12, 18, 24)
 MIN_M15_BARS = 50
 MIN_H1_BARS = 48
-ACCOUNT_ENVS = {
-    "EA": ("C:\\MT5_Portable_2\\terminal64.exe", "MT5_EA_LOGIN", "MT5_EA_PASSWORD", "Exness-MT5Real33"),
-    "EM": ("C:\\MT5_Portable_3\\terminal64.exe", "MT5_EM_LOGIN", "MT5_EM_PASSWORD", "Exness-MT5Real35"),
-    "BA": ("C:\\Program Files\\MetaTrader 5\\terminal64.exe", None, None, None),
-}
+CONFIG_SOURCE = "ladder_guard.ACCOUNTS"
 
 
 # ---------------------------------------------------------------- pure analysis (no I/O, no MT5)
@@ -310,16 +306,13 @@ def record_decision(analysis_id: str, decision: str, decision_reason: str,
 
 def account_config(account: str) -> dict:
     account = account.upper()
-    if account not in ACCOUNT_ENVS:
-        raise ValueError(f"unknown MT5 account {account}")
-    path, login_env, password_env, server = ACCOUNT_ENVS[account]
-    cfg = {"path": path}
-    if login_env:
-        login, password = os.getenv(login_env), os.getenv(password_env)
-        if not login or not password:
-            raise RuntimeError(f"missing {login_env}/{password_env} for {account}")
-        cfg.update(login=int(login), password=password, server=server)
-    return cfg
+    try:
+        from ladder_guard import ACCOUNTS
+    except Exception as e:
+        raise RuntimeError(f"central MT5 config unavailable: {type(e).__name__}") from e
+    if account not in ACCOUNTS:
+        raise RuntimeError(f"missing central MT5 config for {account}")
+    return dict(ACCOUNTS[account])
 
 
 def _fetch_via_mt5(symbol: str, account: str = "EA"):
@@ -451,18 +444,26 @@ def _self_test() -> None:
     finally:
         DECISIONS_LOG = orig
 
-    assert account_config("BA") == {"path": "C:\\Program Files\\MetaTrader 5\\terminal64.exe"}
-    old_env = {k: os.environ.get(k) for k in ("MT5_EA_LOGIN", "MT5_EA_PASSWORD")}
-    os.environ["MT5_EA_LOGIN"] = "123"
-    os.environ["MT5_EA_PASSWORD"] = "pw"
+    import types
+    original_ladder_guard = sys.modules.get("ladder_guard")
+    sys.modules["ladder_guard"] = types.SimpleNamespace(ACCOUNTS={
+        "EA": {"path": "ea-terminal", "login": 111, "password": "secret", "server": "srv"},
+        "EM": {"path": "em-terminal", "login": 222, "password": "secret", "server": "srv"},
+        "BA": {"path": "ba-terminal"},
+    })
     try:
-        assert account_config("EA")["login"] == 123
+        assert account_config("EA")["path"] == "ea-terminal"
+        assert account_config("BA") == {"path": "ba-terminal"}
+        try:
+            account_config("MISSING")
+            raise AssertionError("missing account config must fail closed")
+        except RuntimeError as e:
+            assert "missing central MT5 config" in str(e)
     finally:
-        for k, v in old_env.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+        if original_ladder_guard is None:
+            sys.modules.pop("ladder_guard", None)
+        else:
+            sys.modules["ladder_guard"] = original_ladder_guard
 
     print("self-test OK (cases A/B/C/D/D2/E)")
 

@@ -17,16 +17,17 @@ import sys
 import time
 from datetime import datetime, timezone
 
-sys.path.insert(0, r"C:\TradingBot\Bot_Active")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = r"C:\TradingBot\Bot_Active"
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
 import alert_watch as aw  # noqa: E402
 from heartbeat import write_heartbeat  # noqa: E402 -- shared heartbeat writer, same one every other bot uses
 
 POLL_SEC = 60
-ACCOUNT_ENVS = {
-    "EA": ("C:\\MT5_Portable_2\\terminal64.exe", "MT5_EA_LOGIN", "MT5_EA_PASSWORD", "Exness-MT5Real33"),
-    "EM": ("C:\\MT5_Portable_3\\terminal64.exe", "MT5_EM_LOGIN", "MT5_EM_PASSWORD", "Exness-MT5Real35"),
-    "BA": ("C:\\Program Files\\MetaTrader 5\\terminal64.exe", None, None, None),
-}
+CONFIG_SOURCE = "ladder_guard.ACCOUNTS"
 
 # 2026-08-16 op-hardening (Ahmed-approved, operational only -- no strategy/
 # entry/timeout/risk logic touched): single-instance lock, same
@@ -94,16 +95,13 @@ def _acquire_lock():
 
 def account_config(account):
     account = account.upper()
-    if account not in ACCOUNT_ENVS:
-        raise ValueError(f"unknown MT5 account {account}")
-    path, login_env, password_env, server = ACCOUNT_ENVS[account]
-    cfg = {"path": path}
-    if login_env:
-        login, password = os.getenv(login_env), os.getenv(password_env)
-        if not login or not password:
-            raise RuntimeError(f"missing {login_env}/{password_env} for {account}")
-        cfg.update(login=int(login), password=password, server=server)
-    return cfg
+    try:
+        from ladder_guard import ACCOUNTS
+    except Exception as e:
+        raise RuntimeError(f"central MT5 config unavailable: {type(e).__name__}") from e
+    if account not in ACCOUNTS:
+        raise RuntimeError(f"missing central MT5 config for {account}")
+    return dict(ACCOUNTS[account])
 
 
 def _fetch(mt5, symbol):
@@ -116,14 +114,10 @@ def _fetch(mt5, symbol):
 
 
 def _connect_mt5(mt5, account):
-    delay = 5
-    while True:
-        mt5.shutdown()
-        if mt5.initialize(**account_config(account)):
-            return
-        log(f"{account} mt5 init failed {mt5.last_error()} -- retrying in {delay}s")
-        time.sleep(delay)
-        delay = min(60, delay * 2)
+    mt5.shutdown()
+    if mt5.initialize(**account_config(account)):
+        return
+    raise RuntimeError(f"{account} mt5 init failed {mt5.last_error()}")
 
 
 def run_once(mt5) -> int:
@@ -200,10 +194,12 @@ def main():
 def _self_test():
     """ponytail: smallest check that fails if the lock logic breaks."""
     import tempfile
+    import types
     global LOCK_PATH
     orig = LOCK_PATH
     d = tempfile.mkdtemp()
     LOCK_PATH = os.path.join(d, "test.lock")
+    original_ladder_guard = sys.modules.get("ladder_guard")
     try:
         ok1, _ = _acquire_lock()
         assert ok1 is True, "first acquire should succeed"
@@ -218,10 +214,55 @@ def _self_test():
             json.dump({"pid": 999999999, "ts": time.time()}, f)
         ok4, _ = _acquire_lock()
         assert ok4 is True, "a lock owned by a dead pid must be taken over immediately"
-        assert account_config("BA") == {"path": "C:\\Program Files\\MetaTrader 5\\terminal64.exe"}
+
+        sys.modules["ladder_guard"] = types.SimpleNamespace(ACCOUNTS={
+            "EA": {"path": "ea-terminal", "login": 111, "password": "secret", "server": "srv"},
+            "EM": {"path": "em-terminal", "login": 222, "password": "secret", "server": "srv"},
+            "BA": {"path": "ba-terminal"},
+        })
+        assert account_config("BA") == {"path": "ba-terminal"}
+        try:
+            account_config("MISSING")
+            raise AssertionError("missing account config must fail closed")
+        except RuntimeError as e:
+            assert "missing central MT5 config" in str(e)
+
+        original_load, original_save = aw.load_watches, aw.save_watches
+        original_reeval, original_log = aw.reevaluate_watch, aw.log_reevaluation
+        original_connect, original_fetch = globals()["_connect_mt5"], globals()["_fetch"]
+        events = []
+        t0 = datetime(2026, 8, 24, tzinfo=timezone.utc).timestamp()
+        watches = {
+            "ea": aw.WatchEntry("ea", "TEST", "UP", 100.0, datetime.fromtimestamp(t0, tz=timezone.utc).isoformat(), t0, 100.5, account="EA"),
+            "bad": aw.WatchEntry("bad", "TEST", "UP", 100.0, datetime.fromtimestamp(t0, tz=timezone.utc).isoformat(), t0, 100.5, account="MISSING"),
+            "ba": aw.WatchEntry("ba", "TEST", "UP", 100.0, datetime.fromtimestamp(t0, tz=timezone.utc).isoformat(), t0, 100.5, account="BA"),
+        }
+        try:
+            aw.load_watches = lambda: watches
+            aw.save_watches = lambda _w: None
+            aw.reevaluate_watch = lambda w, _m15, _h1, _now: ("WATCHING", {"price": 101.0, "reason": "ok"})
+            aw.log_reevaluation = lambda w, status, detail, *_args: events.append((w.account, status, detail.get("reason")))
+            globals()["_connect_mt5"] = lambda _mt5, account: account_config(account)
+            globals()["_fetch"] = lambda _mt5, _symbol: (
+                [{"time": int(time.time()) - 901, "open": 1, "high": 2, "low": 1, "close": 1.5, "tick_volume": 1}],
+                [{"time": int(time.time()) - 3601, "open": 1, "high": 2, "low": 1, "close": 1.5, "tick_volume": 1}],
+            )
+            changed = run_once(object())
+            assert changed == 3, changed
+            assert ("EA", "WATCHING", "ok") in events
+            assert ("BA", "WATCHING", "ok") in events
+            assert any(e[0] == "MISSING" and e[1] == "ANALYSIS_INCOMPLETE" for e in events)
+        finally:
+            aw.load_watches, aw.save_watches = original_load, original_save
+            aw.reevaluate_watch, aw.log_reevaluation = original_reeval, original_log
+            globals()["_connect_mt5"], globals()["_fetch"] = original_connect, original_fetch
     finally:
         LOCK_PATH = orig
-    print("self-test OK (lock acquire/refuse/release/stale-takeover)")
+        if original_ladder_guard is None:
+            sys.modules.pop("ladder_guard", None)
+        else:
+            sys.modules["ladder_guard"] = original_ladder_guard
+    print("self-test OK (lock + central config + per-account failure isolation)")
 
 
 if __name__ == "__main__":

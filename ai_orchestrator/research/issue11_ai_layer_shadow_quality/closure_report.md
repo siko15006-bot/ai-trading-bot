@@ -6,6 +6,7 @@ Generated: 2026-08-24
 
 - Root cause found: `windows_bots/alert_decision_gate.py` and `windows_bots/alert_watch_loop.py` were hard-wired to the EA terminal (`C:\MT5_Portable_2\terminal64.exe`), so any BA/EM symbol/account path was analyzed through the wrong MT5 session.
 - Fix implemented in repo branch only: gate and watcher now accept/store account scope and switch MT5 sessions per account before fetching read-only M15/H1 bars.
+- Follow-up fix: removed the temporary `MT5_*_LOGIN/PASSWORD` ENV dependency and reused the live centralized `ladder_guard.ACCOUNTS` loader used by dashboard/guards. Missing account config now fails closed for that account only instead of blocking the whole watcher loop.
 - Live watcher recovery check: local runtime currently has `alert_watch_loop.py` process running, heartbeat fresh, and `active_watches=0`.
 - Pending event result: `alert_watches.json` contains no `WATCHING` rows at audit time, so there are no pending events to process. Existing terminal states are `SETUP_CONFIRMED`, `INVALIDATED`, or `EXPIRED`.
 - Live restart: not performed.
@@ -39,6 +40,7 @@ Generated: 2026-08-24
 - `python windows_bots\alert_watch_loop.py --self-test`
 - `python windows_bots\orbit_shadow_scoreboard.py --test`
 - `python -m py_compile windows_bots\alert_decision_gate.py windows_bots\alert_watch.py windows_bots\alert_watch_loop.py windows_bots\orbit_shadow_scoreboard.py`
+- Read-only MT5 proof after config-loader follow-up: EA `BTCUSDm`, EM `BTCUSDm`, BA `EURUSD.s`; each returned >=50 M15 bars and >=48 H1 bars. Secrets were not printed.
 
 ## Boundaries
 
