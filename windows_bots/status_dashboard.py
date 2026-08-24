@@ -25,6 +25,7 @@ import re
 import sys
 import time
 import threading
+import tempfile
 from datetime import datetime, timedelta, timezone
 import urllib.request
 import urllib.error
@@ -35,10 +36,131 @@ import urllib.parse
 # actually managing trades. Importing has no side effects (mt5.initialize()
 # only runs inside ladder_guard.main(), guarded by __main__).
 DEPENDENCY_ERRORS = {}
+AI_STATUS_CACHE = {"ts": 0, "data": None}
+AI_STATUS_TTL_SEC = 300
+AI_STATUS_LOCAL_PATH = os.environ.get(
+    "AI_STATUS_LOCAL_PATH",
+    r"C:\TradingBot\Bot_Active\ai_status.local.json",
+)
 
 
 def _dependency_failed(name, error):
     DEPENDENCY_ERRORS[name] = f"{type(error).__name__}: {error}"[:240]
+
+
+def _utc_now_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _unavailable_quota():
+    return {
+        "usage": "UNAVAILABLE",
+        "remaining": "UNAVAILABLE",
+        "reset": "UNAVAILABLE",
+        "status": "UNAVAILABLE",
+    }
+
+
+def _run_official_cli(args, timeout=8):
+    """Run official CLI status commands only; never reads auth files directly."""
+    try:
+        cmd = ["cmd", "/c", *args] if os.name == "nt" else args
+        p = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+            encoding="utf-8", errors="replace",
+        )
+        out = "\n".join(x for x in (p.stdout.strip(), p.stderr.strip()) if x)
+        return {"ok": p.returncode == 0, "stdout": out, "returncode": p.returncode}
+    except Exception as e:
+        return {"ok": False, "stdout": "", "error": f"{type(e).__name__}: {e}"[:180]}
+
+
+def _load_local_ai_status(path=AI_STATUS_LOCAL_PATH, now=None, stale_after_sec=900):
+    """Optional normalized local cache. Missing/malformed/stale degrades this panel only."""
+    now = now or datetime.now(timezone.utc)
+    if not path or not os.path.exists(path):
+        return {"status": "UNAVAILABLE", "source": "local_cache", "detail": "missing"}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        generated_at = data.get("generated_at") or data.get("last_checked")
+        if generated_at:
+            dt = datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
+            age = max(0, int((now - dt).total_seconds()))
+            if age > stale_after_sec:
+                return {"status": "STALE", "source": "local_cache", "age_sec": age}
+        return {"status": "LIVE", "source": "local_cache", "age_sec": 0, "data": data}
+    except Exception as e:
+        return {"status": "ERROR", "source": "local_cache", "detail": f"{type(e).__name__}: {e}"[:180]}
+
+
+def _collect_ai_status(force=False):
+    now = time.time()
+    if not force and AI_STATUS_CACHE["data"] and now - AI_STATUS_CACHE["ts"] < AI_STATUS_TTL_SEC:
+        data = dict(AI_STATUS_CACHE["data"])
+        data["cache_age_sec"] = round(now - AI_STATUS_CACHE["ts"])
+        return data
+
+    checked = _utc_now_iso()
+    codex_login = _run_official_cli(["codex", "login", "status"])
+    codex_doctor = _run_official_cli(["codex", "doctor", "--json"], timeout=15)
+    claude_auth = _run_official_cli(["claude", "auth", "status"], timeout=15)
+    claude_doctor = _run_official_cli(["claude", "doctor"], timeout=15)
+
+    codex_auth = "LIVE" if codex_login["ok"] and "Logged in" in codex_login["stdout"] else "UNAVAILABLE"
+    codex_install = "UNAVAILABLE"
+    codex_model = "UNAVAILABLE"
+    if codex_doctor["ok"]:
+        try:
+            doctor = json.loads(codex_doctor["stdout"])
+            codex_install = doctor.get("overallStatus", "UNAVAILABLE").upper()
+            codex_model = doctor.get("checks", {}).get("config.load", {}).get("details", {}).get("model", "UNAVAILABLE")
+        except Exception:
+            codex_install = "ERROR"
+
+    claude_plan = "UNAVAILABLE"
+    claude_auth_status = "UNAVAILABLE"
+    if claude_auth["ok"]:
+        try:
+            auth = json.loads(claude_auth["stdout"])
+            claude_auth_status = "LIVE" if auth.get("loggedIn") else "UNAVAILABLE"
+            if auth.get("subscriptionType"):
+                claude_plan = str(auth["subscriptionType"]).title()
+        except Exception:
+            claude_auth_status = "ERROR"
+    claude_install = "OK" if claude_doctor["ok"] and "No installation issues found" in claude_doctor["stdout"] else "UNAVAILABLE"
+
+    data = {
+        "message": "Exact quota telemetry is not exposed by the current official CLI",
+        "last_checked": checked,
+        "cache_ttl_sec": AI_STATUS_TTL_SEC,
+        "cache_age_sec": 0,
+        "local_status": _load_local_ai_status(),
+        "providers": {
+            "codex": {
+                "provider": "Codex",
+                "auth_status": codex_auth,
+                "plan": "UNAVAILABLE",
+                "model": codex_model,
+                "install_status": codex_install,
+                "quota": _unavailable_quota(),
+                "last_checked": checked,
+                "source_status": "LIVE" if codex_auth == "LIVE" else codex_auth,
+            },
+            "claude": {
+                "provider": "Claude",
+                "auth_status": claude_auth_status,
+                "plan": claude_plan,
+                "model": "UNAVAILABLE",
+                "install_status": claude_install,
+                "quota": _unavailable_quota(),
+                "last_checked": checked,
+                "source_status": "LIVE" if claude_auth_status == "LIVE" else claude_auth_status,
+            },
+        },
+    }
+    AI_STATUS_CACHE["ts"], AI_STATUS_CACHE["data"] = now, data
+    return data
 
 
 try:
@@ -1131,6 +1253,49 @@ def _demo():
         assert any(r["bot"] == "orb_eth_exness" and r["account"] == "EA" and r["status"] == "BLOCKED (MANUAL)" for r in rows), rows
     finally:
         globals()["period_manual_block_reason"] = orig_reason_fn
+
+    missing = _load_local_ai_status(os.path.join(tempfile.gettempdir(), "__missing_ai_status.json"))
+    assert missing["status"] == "UNAVAILABLE", missing
+    with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as f:
+        f.write("{bad json")
+        malformed_path = f.name
+    try:
+        malformed = _load_local_ai_status(malformed_path)
+        assert malformed["status"] == "ERROR", malformed
+    finally:
+        os.unlink(malformed_path)
+    with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as f:
+        json.dump({"generated_at": "2026-01-01T00:00:00+00:00"}, f)
+        stale_path = f.name
+    try:
+        stale = _load_local_ai_status(stale_path, now=datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc), stale_after_sec=30)
+        assert stale["status"] == "STALE", stale
+    finally:
+        os.unlink(stale_path)
+
+    orig_cli = globals()["_run_official_cli"]
+    try:
+        def _fake_cli(args, timeout=8):
+            if args[:3] == ["codex", "login", "status"]:
+                return {"ok": True, "stdout": "Logged in using ChatGPT", "returncode": 0}
+            if args[:3] == ["codex", "doctor", "--json"]:
+                return {"ok": True, "stdout": json.dumps({
+                    "overallStatus": "ok",
+                    "checks": {"config.load": {"details": {"model": "gpt-test"}}},
+                }), "returncode": 0}
+            if args[:3] == ["claude", "auth", "status"]:
+                return {"ok": True, "stdout": json.dumps({"loggedIn": True, "subscriptionType": "pro"}), "returncode": 0}
+            return {"ok": True, "stdout": "No installation issues found.", "returncode": 0}
+        globals()["_run_official_cli"] = _fake_cli
+        AI_STATUS_CACHE["ts"], AI_STATUS_CACHE["data"] = 0, None
+        ai = _collect_ai_status(force=True)
+        assert ai["providers"]["codex"]["auth_status"] == "LIVE", ai
+        assert ai["providers"]["codex"]["quota"]["usage"] == "UNAVAILABLE", ai
+        assert ai["providers"]["claude"]["plan"] == "Pro", ai
+        assert ai["providers"]["claude"]["quota"]["remaining"] == "UNAVAILABLE", ai
+    finally:
+        globals()["_run_official_cli"] = orig_cli
+        AI_STATUS_CACHE["ts"], AI_STATUS_CACHE["data"] = 0, None
 
     def _demo_obs():
         return _observability_model(
@@ -3271,6 +3436,22 @@ td{padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
 .component-card{background:var(--card);border:1px solid var(--border);border-radius:12px;margin-bottom:10px;overflow:hidden}
 .component-title{padding:10px 12px;background:var(--card2);font-weight:800}
 .small{font-size:12px;color:var(--muted)}
+.ai-status-card{background:linear-gradient(160deg,#151923,#0e1118);border:1px solid #293142;border-radius:18px;padding:14px;margin:0 0 14px 0;box-shadow:var(--shadow)}
+.ai-status-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;margin-bottom:10px}
+.ai-status-title{font-size:18px;font-weight:900;letter-spacing:.2px}
+.ai-status-msg{color:var(--muted);font-size:12px;line-height:1.45;margin-top:4px}
+.ai-provider-grid{display:grid;grid-template-columns:1fr;gap:10px}
+@media (min-width:720px){.ai-provider-grid{grid-template-columns:1fr 1fr}}
+.ai-provider{background:rgba(255,255,255,.035);border:1px solid #2a3345;border-radius:14px;padding:12px}
+.ai-provider-top{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:8px}
+.ai-provider-name{font-weight:900}
+.ai-pill{display:inline-flex;border-radius:999px;padding:3px 9px;font-size:11px;font-weight:800;background:#253044;color:#cbd5e1}
+.ai-pill.live{background:var(--good-bg);color:var(--good)}
+.ai-pill.unavailable,.ai-pill.stale{background:#273041;color:#94a3b8}
+.ai-kv{display:grid;grid-template-columns:92px 1fr;gap:6px 10px;font-size:12.5px}
+.ai-k{color:var(--muted)}
+.ai-v{font-weight:700;word-break:break-word}
+.ai-placeholder{display:inline-flex;min-height:18px;align-items:center;border-radius:7px;background:#2b3240;color:#94a3b8;padding:2px 8px;font-size:11px;font-weight:800;letter-spacing:.2px}
 </style></head><body>
 <div class="nav"><a href="/">🏠 Dashboard</a><a href="/analytics">📊 Analytics</a><a href="/risk">⚠️ Risk</a><a href="/reports">📄 Reports</a><a href="/trades">📜 Trades</a><a href="/monitor" class="active">🖥️ Monitor</a></div>
 <h1>🖥️ Monitor (Read-Only)</h1>
@@ -3281,6 +3462,35 @@ td{padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
 {% endif %}
 
 <h2>🧭 FULL-DETAIL OBSERVABILITY</h2>
+<div class="ai-status-card">
+  <div class="ai-status-head">
+    <div>
+      <div class="ai-status-title">AI Status</div>
+      <div class="ai-status-msg">{{ ai_status.message }}</div>
+    </div>
+    <span class="ai-pill unavailable">quota unavailable</span>
+  </div>
+  <div class="ai-provider-grid">
+  {% for key, p in ai_status.providers.items() %}
+    <div class="ai-provider">
+      <div class="ai-provider-top">
+        <span class="ai-provider-name">{{ p.provider }}</span>
+        <span class="ai-pill {{ 'live' if p.source_status == 'LIVE' else 'unavailable' }}">{{ p.auth_status }}</span>
+      </div>
+      <div class="ai-kv">
+        <div class="ai-k">Auth</div><div class="ai-v">{{ p.auth_status }}</div>
+        <div class="ai-k">Plan</div><div class="ai-v">{{ p.plan }}</div>
+        <div class="ai-k">Model/Install</div><div class="ai-v">{{ p.model }} · {{ p.install_status }}</div>
+        <div class="ai-k">Usage</div><div class="ai-v"><span class="ai-placeholder">{{ p.quota.usage }}</span></div>
+        <div class="ai-k">Remaining</div><div class="ai-v"><span class="ai-placeholder">{{ p.quota.remaining }}</span></div>
+        <div class="ai-k">Reset</div><div class="ai-v"><span class="ai-placeholder">{{ p.quota.reset }}</span></div>
+        <div class="ai-k">Last checked</div><div class="ai-v">{{ p.last_checked }}</div>
+      </div>
+    </div>
+  {% endfor %}
+  </div>
+  <div class="small" style="margin-top:10px">No estimates. No progress bars. No auth files, cookies, browser storage, or secrets are read by this panel. Local cache status: {{ ai_status.local_status.status }}.</div>
+</div>
 <div class="health-box">
   <div class="row"><span><b>Health Score</b></span><span class="health-score" style="color:{{ 'var(--good)' if observability.score >= 90 else ('var(--warn)' if observability.score >= 70 else 'var(--bad)') }}">{{ observability.score }}</span></div>
   <div class="small">Score starts at 100. Deductions below are explicit; retired Oracle services are not deducted.</div>
@@ -3708,6 +3918,7 @@ def monitor_page():
     oracle_attr = _get_oracle_attribution()
     bot_health = bot_health_detail(accounts, risk_halt.get("halted") is not False)
     cache_age_sec = round(time.time() - cache_ts)
+    ai_status = _collect_ai_status()
     observability = _observability_model(
         accounts, bot_health, oracle_meta, risk_halt, nts, shadow, pending_breakout,
         pending_signal_runner, pending_signal_bridge, pending_signal_shadow,
@@ -3729,6 +3940,7 @@ def monitor_page():
         pending_signal_shadow=pending_signal_shadow,
         manual_exit_shadow=manual_exit_shadow,
         observability=observability,
+        ai_status=ai_status,
         mt5_errors=mt5_errors, cache_age_sec=cache_age_sec,
     )
 
@@ -4120,6 +4332,7 @@ def api_monitor():
     oracle_attr = _get_oracle_attribution()
     cache_age_sec = round(time.time() - cache_ts)
     bot_health = bot_health_detail(accounts, risk_halt.get("halted") is not False)
+    ai_status = _collect_ai_status()
     return jsonify({
         "no_trade_status": nts,
         "risk_halt": risk_halt,
@@ -4132,6 +4345,7 @@ def api_monitor():
         "pending_signal_bridge": pending_signal_bridge,
         "pending_signal_shadow": pending_signal_shadow,
         "manual_exit_shadow": manual_exit_shadow,
+        "ai_status": ai_status,
         "observability": _observability_model(
             accounts, bot_health, oracle_meta, risk_halt, nts, shadow, pending_breakout,
             pending_signal_runner, pending_signal_bridge, pending_signal_shadow,

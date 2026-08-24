@@ -16,3 +16,4 @@ venv/
 id_rsa*
 *.pem
 windows_bots/status_dashboard.local.json
+windows_bots/ai_status.local.json
