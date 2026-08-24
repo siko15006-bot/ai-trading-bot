@@ -43,6 +43,11 @@ DECISIONS_LOG = os.path.join(BASE_DIR, "alert_decisions.jsonl")
 RANGE_WINDOWS_HOURS = (6, 12, 18, 24)
 MIN_M15_BARS = 50
 MIN_H1_BARS = 48
+ACCOUNT_ENVS = {
+    "EA": ("C:\\MT5_Portable_2\\terminal64.exe", "MT5_EA_LOGIN", "MT5_EA_PASSWORD", "Exness-MT5Real33"),
+    "EM": ("C:\\MT5_Portable_3\\terminal64.exe", "MT5_EM_LOGIN", "MT5_EM_PASSWORD", "Exness-MT5Real35"),
+    "BA": ("C:\\Program Files\\MetaTrader 5\\terminal64.exe", None, None, None),
+}
 
 
 # ---------------------------------------------------------------- pure analysis (no I/O, no MT5)
@@ -303,13 +308,28 @@ def record_decision(analysis_id: str, decision: str, decision_reason: str,
 
 # ---------------------------------------------------------------- standalone CLI (fresh MT5 fetch)
 
-def _fetch_via_mt5(symbol: str):
+def account_config(account: str) -> dict:
+    account = account.upper()
+    if account not in ACCOUNT_ENVS:
+        raise ValueError(f"unknown MT5 account {account}")
+    path, login_env, password_env, server = ACCOUNT_ENVS[account]
+    cfg = {"path": path}
+    if login_env:
+        login, password = os.getenv(login_env), os.getenv(password_env)
+        if not login or not password:
+            raise RuntimeError(f"missing {login_env}/{password_env} for {account}")
+        cfg.update(login=int(login), password=password, server=server)
+    return cfg
+
+
+def _fetch_via_mt5(symbol: str, account: str = "EA"):
     import MetaTrader5 as mt5
-    account_cfg = dict(path=r"C:\MT5_Portable_2\terminal64.exe",
-                         login=<REDACTED_MT5_LOGIN_EA>, password="<REDACTED_MT5_PASSWORD_EA>", server="Exness-MT5Real33")
+    account_cfg = account_config(account)
+    mt5.shutdown()
     if not mt5.initialize(**account_cfg):
-        raise RuntimeError(f"mt5.initialize failed: {mt5.last_error()}")
+        raise RuntimeError(f"{account} mt5.initialize failed: {mt5.last_error()}")
     try:
+        mt5.symbol_select(symbol, True)
         m15 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, MIN_M15_BARS + 10)
         h1 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, MIN_H1_BARS + 10)
     finally:
@@ -321,7 +341,8 @@ def _fetch_via_mt5(symbol: str):
         [dict(zip(cols, [r[c] for c in cols])) for r in h1]
 
 
-def run_gate(symbol: str, alert_type: str, alert_price: float, alert_time: str | None = None) -> dict:
+def run_gate(symbol: str, alert_type: str, alert_price: float, alert_time: str | None = None,
+             account: str = "EA") -> dict:
     """Main entry point for interactive/CLI use: fetches fresh M15+H1 via
     MT5, runs analyze(), logs the ANALYSIS row, returns the structured dict.
     Fails closed to ANALYSIS_INCOMPLETE on any fetch error too.
@@ -333,7 +354,7 @@ def run_gate(symbol: str, alert_type: str, alert_price: float, alert_time: str |
     alert_time = alert_time or datetime.now(timezone.utc).isoformat()
     started = time.time()
     try:
-        m15_rows, h1_rows = _fetch_via_mt5(symbol)
+        m15_rows, h1_rows = _fetch_via_mt5(symbol, account)
     except Exception as e:
         completed = time.time()
         result = GateResult(symbol=symbol, alert_type=alert_type, alert_time=alert_time,
@@ -354,7 +375,7 @@ def run_gate(symbol: str, alert_type: str, alert_price: float, alert_time: str |
         watches = alert_watch.load_watches()
         direction = breakout["status"].split("_", 1)[1]
         w = alert_watch.start_or_update_watch(watches, symbol, direction, breakout["breakout_level"],
-                                                alert_time, alert_price)
+                                                alert_time, alert_price, account)
         out["watch_id"] = w.watch_id
         out["watch_status"] = "WATCHING (new)" if w.reevaluation_count == 0 and w.last_price == alert_price else "WATCHING (duplicate, existing watch updated)"
 
@@ -430,6 +451,19 @@ def _self_test() -> None:
     finally:
         DECISIONS_LOG = orig
 
+    assert account_config("BA") == {"path": "C:\\Program Files\\MetaTrader 5\\terminal64.exe"}
+    old_env = {k: os.environ.get(k) for k in ("MT5_EA_LOGIN", "MT5_EA_PASSWORD")}
+    os.environ["MT5_EA_LOGIN"] = "123"
+    os.environ["MT5_EA_PASSWORD"] = "pw"
+    try:
+        assert account_config("EA")["login"] == 123
+    finally:
+        for k, v in old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
     print("self-test OK (cases A/B/C/D/D2/E)")
 
 
@@ -441,5 +475,6 @@ if __name__ == "__main__":
             sys.exit("usage: alert_decision_gate.py SYMBOL ALERT_TYPE ALERT_PRICE [ALERT_TIME_ISO]")
         symbol, alert_type, alert_price = sys.argv[1], sys.argv[2], float(sys.argv[3])
         alert_time = sys.argv[4] if len(sys.argv) > 4 else None
-        out = run_gate(symbol, alert_type, alert_price, alert_time)
+        account = sys.argv[5] if len(sys.argv) > 5 else "EA"
+        out = run_gate(symbol, alert_type, alert_price, alert_time, account)
         print(json.dumps(out, indent=2, default=str))

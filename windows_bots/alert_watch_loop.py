@@ -22,8 +22,11 @@ import alert_watch as aw  # noqa: E402
 from heartbeat import write_heartbeat  # noqa: E402 -- shared heartbeat writer, same one every other bot uses
 
 POLL_SEC = 60
-ACCOUNT_CFG = dict(path=r"C:\MT5_Portable_2\terminal64.exe",
-                     login=<REDACTED_MT5_LOGIN_EA>, password="<REDACTED_MT5_PASSWORD_EA>", server="Exness-MT5Real33")
+ACCOUNT_ENVS = {
+    "EA": ("C:\\MT5_Portable_2\\terminal64.exe", "MT5_EA_LOGIN", "MT5_EA_PASSWORD", "Exness-MT5Real33"),
+    "EM": ("C:\\MT5_Portable_3\\terminal64.exe", "MT5_EM_LOGIN", "MT5_EM_PASSWORD", "Exness-MT5Real35"),
+    "BA": ("C:\\Program Files\\MetaTrader 5\\terminal64.exe", None, None, None),
+}
 
 # 2026-08-16 op-hardening (Ahmed-approved, operational only -- no strategy/
 # entry/timeout/risk logic touched): single-instance lock, same
@@ -89,7 +92,22 @@ def _acquire_lock():
     return True, None
 
 
+def account_config(account):
+    account = account.upper()
+    if account not in ACCOUNT_ENVS:
+        raise ValueError(f"unknown MT5 account {account}")
+    path, login_env, password_env, server = ACCOUNT_ENVS[account]
+    cfg = {"path": path}
+    if login_env:
+        login, password = os.getenv(login_env), os.getenv(password_env)
+        if not login or not password:
+            raise RuntimeError(f"missing {login_env}/{password_env} for {account}")
+        cfg.update(login=int(login), password=password, server=server)
+    return cfg
+
+
 def _fetch(mt5, symbol):
+    mt5.symbol_select(symbol, True)
     m15 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, 60)
     h1 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 60)
     cols = ["time", "open", "high", "low", "close", "tick_volume"]
@@ -97,13 +115,13 @@ def _fetch(mt5, symbol):
     return to_dicts(m15), to_dicts(h1)
 
 
-def _connect_mt5(mt5):
+def _connect_mt5(mt5, account):
     delay = 5
     while True:
         mt5.shutdown()
-        if mt5.initialize(**ACCOUNT_CFG):
+        if mt5.initialize(**account_config(account)):
             return
-        log(f"mt5 init failed {mt5.last_error()} -- retrying in {delay}s")
+        log(f"{account} mt5 init failed {mt5.last_error()} -- retrying in {delay}s")
         time.sleep(delay)
         delay = min(60, delay * 2)
 
@@ -116,17 +134,21 @@ def run_once(mt5) -> int:
     if not active:
         return 0
 
-    by_symbol: dict[str, list] = {}
+    by_account_symbol: dict[tuple[str, str], list] = {}
     for w in active.values():
-        by_symbol.setdefault(w.symbol, []).append(w)
+        by_account_symbol.setdefault((getattr(w, "account", "EA"), w.symbol), []).append(w)
 
     changed = 0
     now = time.time()
-    for symbol, symbol_watches in by_symbol.items():
+    current_account = None
+    for (account, symbol), symbol_watches in by_account_symbol.items():
         try:
+            if account != current_account:
+                _connect_mt5(mt5, account)
+                current_account = account
             m15_rows, h1_rows = _fetch(mt5, symbol)
         except Exception as e:
-            log(f"{symbol} fetch failed: {e} -- all its watches fail closed this pass")
+            log(f"{account}:{symbol} fetch failed: {e} -- all its watches fail closed this pass")
             for w in symbol_watches:
                 aw.log_reevaluation(w, "ANALYSIS_INCOMPLETE", {"reason": f"fetch failed: {e}"},
                                      w.last_price or 0.0, "UNKNOWN", "UNKNOWN", now)
@@ -164,12 +186,9 @@ def main():
 
     import MetaTrader5 as mt5
     log("alert_watch_loop started -- READ-ONLY, no order-placing import in this process")
-    _connect_mt5(mt5)
     while True:
         try:
             _touch_lock()
-            if not mt5.terminal_info():
-                _connect_mt5(mt5)
             n = run_once(mt5)
             active_count = sum(1 for w in aw.load_watches().values() if w.status == "WATCHING")
             write_heartbeat("alert_watch_loop", active_watches=active_count, changed_this_cycle=n)
@@ -199,6 +218,7 @@ def _self_test():
             json.dump({"pid": 999999999, "ts": time.time()}, f)
         ok4, _ = _acquire_lock()
         assert ok4 is True, "a lock owned by a dead pid must be taken over immediately"
+        assert account_config("BA") == {"path": "C:\\Program Files\\MetaTrader 5\\terminal64.exe"}
     finally:
         LOCK_PATH = orig
     print("self-test OK (lock acquire/refuse/release/stale-takeover)")

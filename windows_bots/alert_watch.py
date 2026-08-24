@@ -44,6 +44,7 @@ class WatchEntry:
     original_alert_time: str     # ISO
     original_alert_time_epoch: float
     original_alert_price: float
+    account: str = "EA"
     status: str = "WATCHING"
     reevaluation_count: int = 0
     last_price: float | None = None
@@ -93,7 +94,8 @@ def find_matching_watch(watches: dict[str, WatchEntry], symbol: str, direction: 
 
 
 def start_or_update_watch(watches: dict[str, WatchEntry], symbol: str, direction: str,
-                            breakout_level: float, alert_time: str, alert_price: float) -> WatchEntry:
+                            breakout_level: float, alert_time: str, alert_price: float,
+                            account: str = "EA") -> WatchEntry:
     """Creates a new WATCHING entry, or -- if a matching one already exists
     (item 7, no duplicate watches for the same setup) -- updates its
     last_price/updated_at and returns the EXISTING entry with its ORIGINAL
@@ -111,7 +113,7 @@ def start_or_update_watch(watches: dict[str, WatchEntry], symbol: str, direction
     watch_id = f"{symbol}_{direction}_{round(breakout_level, 2)}_{alert_time}"
     w = WatchEntry(watch_id=watch_id, symbol=symbol, direction=direction, breakout_level=breakout_level,
                     original_alert_time=alert_time, original_alert_time_epoch=alert_epoch,
-                    original_alert_price=alert_price, last_price=alert_price,
+                    original_alert_price=alert_price, account=account.upper(), last_price=alert_price,
                     created_at_utc=now_iso, updated_at_utc=now_iso)
     watches[watch_id] = w
     save_watches(watches)
