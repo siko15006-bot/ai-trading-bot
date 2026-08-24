@@ -258,6 +258,20 @@ except (ImportError, SyntaxError) as e:
             raise RuntimeError("autonomy_challenge unavailable")
     achall = _AutonomyChallengeUnavailable()
 
+try:
+    from portfolio_risk_guard import _reset_day_id as _risk_reset_day_id
+except (ImportError, SyntaxError) as e:
+    _dependency_failed("portfolio_risk_guard", e)
+    def _risk_reset_day_id(utc_dt):
+        return utc_dt.date()
+
+
+def _operational_day_id(utc_dt):
+    """Same daily cycle used by portfolio_risk_guard: Africa/Cairo reset at 01:00."""
+    if utc_dt.tzinfo is None:
+        utc_dt = utc_dt.replace(tzinfo=timezone.utc)
+    return _risk_reset_day_id(utc_dt.astimezone(timezone.utc)).isoformat()
+
 
 def _pa_call(method, default, *args):
     try:
@@ -1119,12 +1133,12 @@ def _heartbeat_name(marker, acc):
     return f"{base}_{acc}" if acc else base
 
 
-def bot_health_detail(accounts, risk_halted):
+def bot_health_detail(accounts, risk_halted, rows_raw=None):
     """Read-only. Returns one row per known (bot, account) instance:
     PID, State (RUNNING/STALE/STOPPED/UNKNOWN), last heartbeat + age, Role,
     Can Trade (YES/NO/BLOCK ONLY/UNKNOWN), and -- for gold_btc_bot rows,
     where a real per-account gate exists -- Execution Eligibility."""
-    rows_raw = _wmic_pid_map()
+    rows_raw = rows_raw if rows_raw is not None else _wmic_pid_map()
     equity_by_acc = _control_equity_by_code(accounts)
     out = []
     for marker, acc_list, role, stale_after in BOT_REGISTRY:
@@ -1208,6 +1222,11 @@ def _demo():
     labels = _account_labels(flat, "ladder_guard.py", 3)
     assert labels == ["EA", "EM", "BA"], labels
     assert _account_labels(flat, "no_such_marker", 1) == []
+    assert _operational_day_id(datetime(2026, 8, 23, 21, 59, tzinfo=timezone.utc)) == "2026-08-23"
+    assert _operational_day_id(datetime(2026, 8, 23, 22, 0, tzinfo=timezone.utc)) == "2026-08-24"
+    assert _asset_bucket("USOILm") == "OIL"
+    assert _asset_bucket("UKOIL.cash") == "OIL"
+    assert _asset_bucket("XTIUSD") == "OIL"
     from datetime import datetime as _dt
     now = _dt.now(timezone.utc)
     sample = [
@@ -2458,7 +2477,8 @@ def _build_trade_history_snapshot(raw_trades):
     deduped, dup_count = _dedup_trades(raw_trades)
     enriched = [_enrich_trade(t) for t in deduped]
     now_utc = datetime.now(timezone.utc)
-    today_realized_pl = sum(t["pnl"] for t in deduped if t["exit_time"].date() == now_utc.date())
+    today_key = _operational_day_id(now_utc)
+    today_realized_pl = sum(t["pnl"] for t in deduped if _operational_day_id(t["exit_time"]) == today_key)
     week_cutoff = now_utc - timedelta(days=7)
     week_trades = [t for t in deduped if t["exit_time"] >= week_cutoff]
     week_net_pl = sum(t["pnl"] for t in week_trades)
@@ -2549,8 +2569,8 @@ def _filter_trades(trades, period=None, account=None, strategy=None, symbol=None
     now = datetime.now(timezone.utc)
     out = trades
     if period == "today":
-        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        out = [t for t in out if t["exit_time"] >= start]
+        today_key = _operational_day_id(now)
+        out = [t for t in out if _operational_day_id(t["exit_time"]) == today_key]
     elif period == "week":
         start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
         out = [t for t in out if t["exit_time"] >= start]
@@ -3042,7 +3062,7 @@ th{background:var(--card2);color:var(--muted);font-size:11px;text-transform:uppe
 def _period_bounds(period):
     now = datetime.now(timezone.utc) if False else __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
     if period == "daily":
-        return now.strftime("%Y-%m-%d"), "daily_pl", "Today"
+        return _operational_day_id(now), "daily_pl", "Today"
     if period == "weekly":
         return now.strftime("%G-W%V"), "weekly_pl", "This Week"
     return now.strftime("%Y-%m"), "monthly_pl", "This Month"
@@ -3101,7 +3121,8 @@ def analytics_page():
     today_key, _, _ = _period_bounds("daily")
     week_key, _, _ = _period_bounds("weekly")
     month_key, _, _ = _period_bounds("monthly")
-    today_pl = sum(pa.compute_metrics(by_magic.get(m, []))["daily_pl"].get(today_key, 0) for m in pa.ACTIVE_MAGICS)
+    today_pl = sum(t["pnl"] for m in pa.ACTIVE_MAGICS for t in by_magic.get(m, [])
+                   if _operational_day_id(t["exit_time"]) == today_key)
     week_pl = sum(pa.compute_metrics(by_magic.get(m, []))["weekly_pl"].get(week_key, 0) for m in pa.ACTIVE_MAGICS)
     month_pl = sum(pa.compute_metrics(by_magic.get(m, []))["monthly_pl"].get(month_key, 0) for m in pa.ACTIVE_MAGICS)
     active_strategy_count = sum(1 for m in pa.ACTIVE_MAGICS if by_magic.get(m))
@@ -3954,6 +3975,9 @@ def _source_from_strategy_string(strategy):
 
 def _asset_bucket(symbol):
     s = (symbol or "").upper()
+    compact = re.sub(r"[^A-Z0-9]", "", s)
+    if any(x in compact for x in ("WTI", "BRENT", "USOIL", "UKOIL", "XTIUSD", "XBRUSD", "OILUSD", "CRUDE")):
+        return "OIL"
     if "BTC" in s:
         return "BTC"
     if "ETH" in s:
@@ -3985,7 +4009,7 @@ def _market_sessions(now=None):
 def _p0_data_source_map():
     return {
         "portfolio_balance_equity_floating": "_cache.accounts from existing refresh_loop fetch_account()/fetch_oracle()",
-        "realized_today_7d_30d": "portfolio_analytics.fetch_all_closed_trades() via _get_trades(days=30), TTL cached",
+        "realized_today_7d_30d": "portfolio_analytics.fetch_all_closed_trades() via _get_trades(days=30), TTL cached; Today uses portfolio_risk_guard Cairo 01:00 reset day",
         "health_score_deductions_root_cause": "_observability_model() built from existing dashboard cache/components",
         "bot_counts": "_observability_model().components; no process control",
         "exposure_by_account_asset": "_cache.accounts[*].positions already refreshed by dashboard",
@@ -4004,7 +4028,9 @@ def _p0_command_strip(accounts, trades_30d, observability, risk_halt, ai_status,
     equity = sum((a.get("equity") or 0) for a in accounts if not a.get("error"))
     floating = sum((a.get("profit") or 0) for a in accounts if not a.get("error"))
     now = datetime.now(timezone.utc)
-    realized_today = sum(t.get("pnl", 0) for t in trades_30d if t.get("exit_time") and t["exit_time"].date() == now.date())
+    today_key = _operational_day_id(now)
+    realized_today = sum(t.get("pnl", 0) for t in trades_30d
+                         if t.get("exit_time") and _operational_day_id(t["exit_time"]) == today_key)
     realized_7d = sum(t.get("pnl", 0) for t in trades_30d if t.get("exit_time") and t["exit_time"] >= now - timedelta(days=7))
     realized_30d = sum(t.get("pnl", 0) for t in trades_30d if t.get("exit_time") and t["exit_time"] >= now - timedelta(days=30))
 
@@ -4090,6 +4116,7 @@ def monitor_page():
     trades, mt5_errors, cache_ts = _get_trades(days=30)
     trades_30d, cache_30d_ts = trades, cache_ts
     by_magic = _pa_call("group_by_magic", {}, trades)
+    process_rows = _wmic_pid_map()
 
     def _enrich_center(t):
         e = _enrich_trade(t)
@@ -4115,14 +4142,14 @@ def monitor_page():
     risk_halt = _pa_call("risk_halt_status", {"halted": None, "status": "ERROR",
                                                "error": "portfolio_analytics runtime failure"})
     shadow = _shadow_view()
-    pending_breakout = _pending_breakout_shadow_view()
-    pending_signal_runner = _pending_signal_runner_view()
-    pending_signal_bridge = _pending_signal_bridge_view()
+    pending_breakout = _pending_breakout_shadow_view(process_rows)
+    pending_signal_runner = _pending_signal_runner_view(process_rows)
+    pending_signal_bridge = _pending_signal_bridge_view(process_rows)
     pending_signal_shadow = _pending_signal_shadow_view()
-    manual_exit_shadow = _manual_exit_shadow_view()
+    manual_exit_shadow = _manual_exit_shadow_view(process_rows)
     market_context = _monitor_context_view()
     oracle_attr = _get_oracle_attribution()
-    bot_health = bot_health_detail(accounts, risk_halt.get("halted") is not False)
+    bot_health = bot_health_detail(accounts, risk_halt.get("halted") is not False, process_rows)
     cache_age_sec = round(time.time() - cache_ts)
     ai_status = _collect_ai_status()
     observability = _observability_model(
@@ -4212,12 +4239,12 @@ MANUAL_EXIT_SHADOW_SNAPSHOT_LOG = (
 )
 
 
-def _manual_exit_shadow_view():
+def _manual_exit_shadow_view(rows=None):
     """Read-only health card for the isolated manual-exit shadow tracker."""
     state = _read_json_file(MANUAL_EXIT_SHADOW_STATE_PATH, default={}) or {}
     if not state and not os.path.exists(MANUAL_EXIT_SHADOW_REPORT_PATH):
         return None
-    rows = _wmic_pid_map()
+    rows = rows if rows is not None else _wmic_pid_map()
     pids = [pid for cmd, pid in rows if "manual_exit_shadow_tracker.py" in cmd]
     verdict = "INCONCLUSIVE"
     try:
@@ -4252,7 +4279,7 @@ def _manual_exit_shadow_view():
     }
 
 
-def _pending_breakout_shadow_view():
+def _pending_breakout_shadow_view(rows=None):
     hb = _read_json_file(PENDING_BREAKOUT_SHADOW_HEARTBEAT_PATH, default={}) or {}
     state = _read_json_file(PENDING_BREAKOUT_SHADOW_ENGINE_STATE_PATH, default={}) or {}
     if not hb and not state:
@@ -4261,7 +4288,7 @@ def _pending_breakout_shadow_view():
     return {
         "available": True,
         "pid": pid or "—",
-        "alive": _pid_alive(pid),
+        "alive": _pid_alive(pid, rows),
         "engine_state": hb.get("engine_state") or state.get("state") or "—",
         "last_tick_age_ms": hb.get("last_tick_age_ms") or state.get("last_tick_age_ms"),
         "total_setups": hb.get("total_setups") or state.get("total_setups"),
@@ -4272,7 +4299,7 @@ def _pending_breakout_shadow_view():
     }
 
 
-def _pending_signal_runner_view():
+def _pending_signal_runner_view(rows=None):
     hb = _read_json_file(PENDING_SIGNAL_RUNNER_HEARTBEAT_PATH, default={}) or {}
     state = _read_json_file(PENDING_SIGNAL_RUNNER_ENGINE_STATE_PATH, default={}) or {}
     if not hb and not state:
@@ -4281,7 +4308,7 @@ def _pending_signal_runner_view():
     return {
         "available": True,
         "pid": pid or "—",
-        "alive": _pid_alive(pid),
+        "alive": _pid_alive(pid, rows),
         "engine_state": hb.get("engine_state") or state.get("state") or "—",
         "last_tick_age_ms": hb.get("last_tick_age_ms") or state.get("last_tick_age_ms"),
         "total_setups": hb.get("total_setups") or state.get("total_setups"),
@@ -4292,7 +4319,7 @@ def _pending_signal_runner_view():
     }
 
 
-def _pending_signal_bridge_view():
+def _pending_signal_bridge_view(rows=None):
     state = _read_json_file(PENDING_SIGNAL_BRIDGE_STATE_PATH, default={}) or {}
     hb = _read_json_file(PENDING_SIGNAL_BRIDGE_HEARTBEAT_PATH, default={}) or {}
     if not state and not hb:
@@ -4301,7 +4328,7 @@ def _pending_signal_bridge_view():
     return {
         "available": True,
         "pid": pid or "—",
-        "alive": _pid_alive(pid),
+        "alive": _pid_alive(pid, rows),
         "mt5_connected": state.get("mt5_connected"),
         "guard_active": state.get("guard_active"),
         "engine_state": state.get("engine_state") or hb.get("engine_state") or "—",
@@ -4530,21 +4557,22 @@ def api_monitor():
     trades, mt5_errors, cache_ts = _get_trades(days=30)
     trades_30d, cache_30d_ts = trades, cache_ts
     by_magic = _pa_call("group_by_magic", {}, trades)
+    process_rows = _wmic_pid_map()
     nts = _pa_call("no_trade_status", [{"bot": "portfolio_analytics", "status": "EXECUTION_ERROR",
                                         "reason": "runtime dependency failure", "last_trade_time": None,
                                         "time_since_last_trade_sec": None, "last_heartbeat_age_sec": None}], by_magic)
     risk_halt = _pa_call("risk_halt_status", {"halted": None, "status": "ERROR",
                                                "error": "portfolio_analytics runtime failure"})
     shadow = _shadow_view()
-    pending_breakout = _pending_breakout_shadow_view()
-    pending_signal_runner = _pending_signal_runner_view()
-    pending_signal_bridge = _pending_signal_bridge_view()
+    pending_breakout = _pending_breakout_shadow_view(process_rows)
+    pending_signal_runner = _pending_signal_runner_view(process_rows)
+    pending_signal_bridge = _pending_signal_bridge_view(process_rows)
     pending_signal_shadow = _pending_signal_shadow_view()
-    manual_exit_shadow = _manual_exit_shadow_view()
+    manual_exit_shadow = _manual_exit_shadow_view(process_rows)
     market_context = _monitor_context_view()
     oracle_attr = _get_oracle_attribution()
     cache_age_sec = round(time.time() - cache_ts)
-    bot_health = bot_health_detail(accounts, risk_halt.get("halted") is not False)
+    bot_health = bot_health_detail(accounts, risk_halt.get("halted") is not False, process_rows)
     ai_status = _collect_ai_status()
     observability = _observability_model(
         accounts, bot_health, oracle_meta, risk_halt, nts, shadow, pending_breakout,
