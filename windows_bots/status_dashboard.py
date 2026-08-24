@@ -1326,6 +1326,20 @@ def _demo():
     DEPENDENCY_ERRORS.clear()
     DEPENDENCY_ERRORS.update(import_errors)
 
+    p0 = _p0_command_strip(
+        accounts=[{"name": "Bybit MT5", "balance": 100, "equity": 101, "profit": 1,
+                   "positions": [{"account": "BA", "symbol": "BTCUSD", "side": "BUY",
+                                  "profit": 1, "protection": "PROTECTED"}]}],
+        trades_30d=[{"pnl": 2, "exit_time": datetime.now(timezone.utc)}],
+        observability=obs, risk_halt={"halted": False},
+        ai_status={"providers": {"codex": {"auth_status": "LIVE"}, "claude": {"auth_status": "LIVE", "plan": "Pro"}}},
+        cache_age_sec=1, trade_cache_age_sec=1,
+    )
+    assert p0["portfolio"]["equity"] == 101, p0
+    assert p0["portfolio"]["realized_today"] == 2, p0
+    assert p0["risk"]["protection"] == "OK", p0
+    assert "health_score_deductions_root_cause" in p0["data_source_map"], p0
+
     orig_config_path = globals()["ORACLE_CONFIG_PATH"]
     old_env = {k: os.environ.get(k) for k in ("STATUS_DASHBOARD_ORACLE_HOST", "STATUS_DASHBOARD_ORACLE_SSH_KEY")}
     try:
@@ -3452,6 +3466,21 @@ td{padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
 .ai-k{color:var(--muted)}
 .ai-v{font-weight:700;word-break:break-word}
 .ai-placeholder{display:inline-flex;min-height:18px;align-items:center;border-radius:7px;background:#2b3240;color:#94a3b8;padding:2px 8px;font-size:11px;font-weight:800;letter-spacing:.2px}
+.p0-strip{background:radial-gradient(circle at top left,#223146 0,#111722 42%,#0b0f16 100%);border:1px solid #2b3548;border-radius:22px;padding:14px;margin-bottom:14px;box-shadow:0 14px 40px rgba(0,0,0,.22)}
+.p0-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:12px}
+.p0-title{font-size:18px;font-weight:950;letter-spacing:.2px}
+.p0-sub{font-size:12px;color:#9aa7b8;margin-top:3px}
+.p0-score{font-size:36px;font-weight:950;line-height:1;color:{{ 'var(--good)' if p0.health.score >= 90 else ('var(--warn)' if p0.health.score >= 70 else 'var(--bad)') }}}
+.p0-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+@media (min-width:760px){.p0-grid{grid-template-columns:repeat(6,1fr)}}
+.p0-cell{background:rgba(255,255,255,.045);border:1px solid rgba(148,163,184,.18);border-radius:14px;padding:10px;min-width:0}
+.p0-label{font-size:10.5px;color:#91a0b4;text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.p0-value{font-size:17px;font-weight:900;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.p0-good{color:var(--good)} .p0-bad{color:var(--bad)} .p0-warn{color:var(--warn)}
+.p0-mini{font-size:11.5px;color:#9aa7b8;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.p0-band{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}
+.p0-chip{display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:5px 9px;background:rgba(255,255,255,.055);border:1px solid rgba(148,163,184,.18);font-size:12px;font-weight:800}
+.p0-chip.good{color:var(--good);background:var(--good-bg)} .p0-chip.warn{color:var(--warn);background:var(--warn-bg)} .p0-chip.bad{color:var(--bad);background:var(--bad-bg)}
 </style></head><body>
 <div class="nav"><a href="/">🏠 Dashboard</a><a href="/analytics">📊 Analytics</a><a href="/risk">⚠️ Risk</a><a href="/reports">📄 Reports</a><a href="/trades">📜 Trades</a><a href="/monitor" class="active">🖥️ Monitor</a></div>
 <h1>🖥️ Monitor (Read-Only)</h1>
@@ -3460,6 +3489,52 @@ td{padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
 {% if risk_halt.halted %}
 <div class="halt-banner">🛑 RISK_HALT ACTIVE since {{ risk_halt.since }}</div>
 {% endif %}
+
+<div class="p0-strip">
+  <div class="p0-head">
+    <div>
+      <div class="p0-title">Dashboard V2 P0 Command Strip</div>
+      <div class="p0-sub">Existing trusted sources only · no extra Oracle polling · read-only</div>
+    </div>
+    <div style="text-align:right">
+      <div class="p0-score">{{ p0.health.score }}</div>
+      <div class="p0-mini">{{ p0.health.root_cause }}</div>
+    </div>
+  </div>
+  <div class="p0-grid">
+    <div class="p0-cell"><div class="p0-label">Equity</div><div class="p0-value">${{ '%.2f'|format(p0.portfolio.equity) }}</div><div class="p0-mini">Balance ${{ '%.2f'|format(p0.portfolio.balance) }}</div></div>
+    <div class="p0-cell"><div class="p0-label">Floating</div><div class="p0-value {{ 'p0-good' if p0.portfolio.floating >= 0 else 'p0-bad' }}">{{ '%+.2f'|format(p0.portfolio.floating) }}</div><div class="p0-mini">live open P/L</div></div>
+    <div class="p0-cell"><div class="p0-label">Realized Today</div><div class="p0-value {{ 'p0-good' if p0.portfolio.realized_today >= 0 else 'p0-bad' }}">{{ '%+.2f'|format(p0.portfolio.realized_today) }}</div><div class="p0-mini">closed trades</div></div>
+    <div class="p0-cell"><div class="p0-label">Realized 7D</div><div class="p0-value {{ 'p0-good' if p0.portfolio.realized_7d >= 0 else 'p0-bad' }}">{{ '%+.2f'|format(p0.portfolio.realized_7d) }}</div><div class="p0-mini">cached MT5 history</div></div>
+    <div class="p0-cell"><div class="p0-label">Realized 30D</div><div class="p0-value {{ 'p0-good' if p0.portfolio.realized_30d >= 0 else 'p0-bad' }}">{{ '%+.2f'|format(p0.portfolio.realized_30d) }}</div><div class="p0-mini">cached MT5 history</div></div>
+    <div class="p0-cell"><div class="p0-label">Risk / Feed</div><div class="p0-value {{ 'p0-bad' if p0.risk.risk_halt == 'ACTIVE' else ('p0-warn' if p0.feed.state != 'FRESH' else 'p0-good') }}">{{ p0.risk.risk_halt }} · {{ p0.feed.state }}</div><div class="p0-mini">{{ p0.risk.protection }} protection</div></div>
+  </div>
+  <div class="p0-band">
+    <span class="p0-chip good">LIVE {{ p0.counts.live }}</span>
+    <span class="p0-chip">PILOT {{ p0.counts.pilot }}</span>
+    <span class="p0-chip">SHADOW {{ p0.counts.shadow }}</span>
+    <span class="p0-chip warn">BLOCKED {{ p0.counts.blocked }}</span>
+    <span class="p0-chip warn">STALE {{ p0.counts.stale }}</span>
+    <span class="p0-chip {{ 'bad' if p0.counts.down else 'good' }}">DOWN {{ p0.counts.down }}</span>
+    <span class="p0-chip {{ 'bad' if p0.risk.unprotected else 'good' }}">SL protection {{ p0.risk.protected }}/{{ p0.risk.protected + p0.risk.unprotected }}</span>
+    <span class="p0-chip">Codex {{ p0.ai.codex.auth_status or 'UNKNOWN' }}</span>
+    <span class="p0-chip">Claude {{ p0.ai.claude.auth_status or 'UNKNOWN' }} / {{ p0.ai.claude.plan or 'UNAVAILABLE' }}</span>
+    <span class="p0-chip">Quota {{ p0.ai.quota }}</span>
+    <span class="p0-chip">Asia {{ p0.feed.sessions.asia }}</span>
+    <span class="p0-chip">London {{ p0.feed.sessions.london }}</span>
+    <span class="p0-chip">NY {{ p0.feed.sessions.new_york }}</span>
+    <span class="p0-chip good">Crypto {{ p0.feed.sessions.crypto_24_7 }}</span>
+    <span class="p0-chip">Cache {{ p0.feed.dashboard_cache_age_sec }}s · Trades {{ p0.feed.trade_cache_age_sec }}s</span>
+  </div>
+  <div class="p0-band">
+    {% for asset, e in p0.exposure.items() %}
+    <span class="p0-chip">{{ asset }} {{ e.positions }} pos · {{ e.account_count }} acct · {{ '%+.2f'|format(e.floating) }}</span>
+    {% endfor %}
+  </div>
+  {% if p0.correlated_warnings %}
+  <div class="p0-band">{% for w in p0.correlated_warnings %}<span class="p0-chip warn">{{ w }}</span>{% endfor %}</div>
+  {% endif %}
+</div>
 
 <h2>🧭 FULL-DETAIL OBSERVABILITY</h2>
 <div class="ai-status-card">
@@ -3877,12 +3952,143 @@ def _source_from_strategy_string(strategy):
     return "BOT"
 
 
+def _asset_bucket(symbol):
+    s = (symbol or "").upper()
+    if "BTC" in s:
+        return "BTC"
+    if "ETH" in s:
+        return "ETH"
+    if "XAU" in s or "GOLD" in s:
+        return "XAU"
+    if any(c in s for c in ("USD", "EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD")) and "/" not in s:
+        return "FX"
+    if "/" in s or s.endswith("USDT"):
+        return "CRYPTO"
+    return "OTHER"
+
+
+def _market_sessions(now=None):
+    """Deterministic UTC session labels only; no market-data polling."""
+    now = now or datetime.now(timezone.utc)
+    h = now.hour + now.minute / 60
+    def state(start, end):
+        return "OPEN" if start <= h < end else "CLOSED"
+    return {
+        "crypto_24_7": "OPEN",
+        "asia": state(0, 9),
+        "london": state(7, 16),
+        "new_york": state(13, 22),
+        "utc": now.replace(microsecond=0).isoformat(),
+    }
+
+
+def _p0_data_source_map():
+    return {
+        "portfolio_balance_equity_floating": "_cache.accounts from existing refresh_loop fetch_account()/fetch_oracle()",
+        "realized_today_7d_30d": "portfolio_analytics.fetch_all_closed_trades() via _get_trades(days=30), TTL cached",
+        "health_score_deductions_root_cause": "_observability_model() built from existing dashboard cache/components",
+        "bot_counts": "_observability_model().components; no process control",
+        "exposure_by_account_asset": "_cache.accounts[*].positions already refreshed by dashboard",
+        "correlated_exposure_warning": "derived from existing open positions only",
+        "risk_halt_protection": "portfolio_analytics.risk_halt_status() + existing position SL/TP protection labels",
+        "ai_status": "_collect_ai_status() official CLI status only; quota remains UNAVAILABLE",
+        "market_sessions_feed_freshness": "deterministic UTC session windows + dashboard/trade-cache/component ages",
+        "oracle_pressure": "reuses _cache.oracle_meta and _oracle_attr_cache; no additional Oracle SSH polling",
+    }
+
+
+def _p0_command_strip(accounts, trades_30d, observability, risk_halt, ai_status,
+                      cache_age_sec, trade_cache_age_sec):
+    positions = [p for a in accounts for p in a.get("positions", []) if not a.get("error")]
+    balance = sum((a.get("balance") or 0) for a in accounts if not a.get("error"))
+    equity = sum((a.get("equity") or 0) for a in accounts if not a.get("error"))
+    floating = sum((a.get("profit") or 0) for a in accounts if not a.get("error"))
+    now = datetime.now(timezone.utc)
+    realized_today = sum(t.get("pnl", 0) for t in trades_30d if t.get("exit_time") and t["exit_time"].date() == now.date())
+    realized_7d = sum(t.get("pnl", 0) for t in trades_30d if t.get("exit_time") and t["exit_time"] >= now - timedelta(days=7))
+    realized_30d = sum(t.get("pnl", 0) for t in trades_30d if t.get("exit_time") and t["exit_time"] >= now - timedelta(days=30))
+
+    flat_components = [c for rows in observability.get("components", {}).values() for c in rows]
+    counts = {
+        "live": sum(1 for c in flat_components if c.get("status") == "RUNNING" and c.get("mode") == "LIVE"),
+        "pilot": sum(1 for c in flat_components if "PILOT" in str(c.get("name", "") + c.get("mode", "")).upper()),
+        "shadow": sum(1 for c in flat_components if c.get("group") == "Shadows" or c.get("mode") == "SHADOW"),
+        "blocked": sum(1 for c in flat_components if c.get("status") == "BLOCKED" or "BLOCKED" in str(c.get("mode", ""))),
+        "stale": sum(1 for c in flat_components if c.get("status") == "STALE"),
+        "down": sum(1 for c in flat_components if c.get("status") in ("DOWN", "ERROR")),
+    }
+
+    exposure = {}
+    for p in positions:
+        asset = _asset_bucket(p.get("symbol"))
+        acc = p.get("account", "UNKNOWN")
+        side = p.get("side", "UNKNOWN")
+        row = exposure.setdefault(asset, {"positions": 0, "accounts": set(), "long": 0, "short": 0, "floating": 0.0})
+        row["positions"] += 1
+        row["accounts"].add(acc)
+        row["floating"] += p.get("profit") or 0
+        if side in ("BUY", "long"):
+            row["long"] += 1
+        elif side in ("SELL", "short"):
+            row["short"] += 1
+    exposure_view = {}
+    warnings = []
+    for asset, row in exposure.items():
+        accounts_list = sorted(row["accounts"])
+        exposure_view[asset] = {**row, "accounts": accounts_list, "account_count": len(accounts_list)}
+        if len(accounts_list) > 1 or (row["long"] and row["short"]):
+            warnings.append(f"{asset}: correlated exposure across {len(accounts_list)} account(s), long={row['long']} short={row['short']}")
+    if not exposure_view:
+        exposure_view = {"NONE": {"positions": 0, "accounts": [], "account_count": 0, "long": 0, "short": 0, "floating": 0.0}}
+
+    protected = sum(1 for p in positions if p.get("protection") == "PROTECTED")
+    unprotected = sum(1 for p in positions if p.get("protection") == "UNPROTECTED")
+    first_deduction = next((d for d in observability.get("deductions", []) if d.get("points", 0) > 0), None)
+    first_problem = (observability.get("problems") or [{}])[0] if observability.get("problems") else {}
+    root_cause = (f"{first_deduction['reason']}: {first_deduction['evidence']}" if first_deduction
+                  else "No active deductions")
+    feed_state = "FRESH" if cache_age_sec <= 30 and trade_cache_age_sec <= ANALYTICS_TTL_SEC else "STALE"
+    if counts["down"]:
+        feed_state = "DEGRADED"
+    return {
+        "portfolio": {
+            "balance": round(balance, 2), "equity": round(equity, 2),
+            "floating": round(floating, 2), "realized_today": round(realized_today, 2),
+            "realized_7d": round(realized_7d, 2), "realized_30d": round(realized_30d, 2),
+        },
+        "health": {
+            "score": observability.get("score"), "root_cause": root_cause,
+            "primary_problem": first_problem.get("component", "—"),
+            "deductions": observability.get("deductions", []),
+        },
+        "counts": counts,
+        "exposure": exposure_view,
+        "correlated_warnings": warnings,
+        "risk": {
+            "risk_halt": "ACTIVE" if risk_halt.get("halted") else ("UNKNOWN" if risk_halt.get("halted") is None else "INACTIVE"),
+            "protected": protected, "unprotected": unprotected,
+            "protection": "OK" if unprotected == 0 else "ATTENTION",
+        },
+        "ai": {
+            "codex": ai_status.get("providers", {}).get("codex", {}),
+            "claude": ai_status.get("providers", {}).get("claude", {}),
+            "quota": "UNAVAILABLE",
+        },
+        "feed": {
+            "state": feed_state, "dashboard_cache_age_sec": cache_age_sec,
+            "trade_cache_age_sec": trade_cache_age_sec, "sessions": _market_sessions(),
+        },
+        "data_source_map": _p0_data_source_map(),
+    }
+
+
 @app.route("/monitor")
 def monitor_page():
     with _cache_lock:
         accounts = _cache["accounts"]
         oracle_meta = _cache["oracle_meta"]
-    trades, mt5_errors, cache_ts = _get_trades(days=7)
+    trades, mt5_errors, cache_ts = _get_trades(days=30)
+    trades_30d, cache_30d_ts = trades, cache_ts
     by_magic = _pa_call("group_by_magic", {}, trades)
 
     def _enrich_center(t):
@@ -3924,6 +4130,11 @@ def monitor_page():
         pending_signal_runner, pending_signal_bridge, pending_signal_shadow,
         manual_exit_shadow, market_context, oracle_attr, cache_age_sec,
     )
+    p0 = _p0_command_strip(
+        accounts, trades_30d, observability, risk_halt, ai_status,
+        cache_age_sec=round(time.time() - _cache.get("ts", time.time())),
+        trade_cache_age_sec=round(time.time() - cache_30d_ts),
+    )
     return render_template_string(
         MONITOR_PAGE,
         trades_today=trades_today, trades_week=trades_week, open_positions=open_positions,
@@ -3941,6 +4152,7 @@ def monitor_page():
         manual_exit_shadow=manual_exit_shadow,
         observability=observability,
         ai_status=ai_status,
+        p0=p0,
         mt5_errors=mt5_errors, cache_age_sec=cache_age_sec,
     )
 
@@ -4315,7 +4527,8 @@ def api_monitor():
     with _cache_lock:
         accounts = _cache["accounts"]
         oracle_meta = _cache["oracle_meta"]
-    trades, mt5_errors, cache_ts = _get_trades(days=7)
+    trades, mt5_errors, cache_ts = _get_trades(days=30)
+    trades_30d, cache_30d_ts = trades, cache_ts
     by_magic = _pa_call("group_by_magic", {}, trades)
     nts = _pa_call("no_trade_status", [{"bot": "portfolio_analytics", "status": "EXECUTION_ERROR",
                                         "reason": "runtime dependency failure", "last_trade_time": None,
@@ -4333,7 +4546,19 @@ def api_monitor():
     cache_age_sec = round(time.time() - cache_ts)
     bot_health = bot_health_detail(accounts, risk_halt.get("halted") is not False)
     ai_status = _collect_ai_status()
+    observability = _observability_model(
+        accounts, bot_health, oracle_meta, risk_halt, nts, shadow, pending_breakout,
+        pending_signal_runner, pending_signal_bridge, pending_signal_shadow,
+        manual_exit_shadow, market_context, oracle_attr, cache_age_sec,
+    )
+    p0 = _p0_command_strip(
+        accounts, trades_30d, observability, risk_halt, ai_status,
+        cache_age_sec=round(time.time() - _cache.get("ts", time.time())),
+        trade_cache_age_sec=round(time.time() - cache_30d_ts),
+    )
     return jsonify({
+        "p0_command_strip": p0,
+        "p0_data_source_map": p0["data_source_map"],
         "no_trade_status": nts,
         "risk_halt": risk_halt,
         "asset_exposure": _pa_call("asset_exposure_summary", {}, accounts),
@@ -4346,11 +4571,7 @@ def api_monitor():
         "pending_signal_shadow": pending_signal_shadow,
         "manual_exit_shadow": manual_exit_shadow,
         "ai_status": ai_status,
-        "observability": _observability_model(
-            accounts, bot_health, oracle_meta, risk_halt, nts, shadow, pending_breakout,
-            pending_signal_runner, pending_signal_bridge, pending_signal_shadow,
-            manual_exit_shadow, market_context, oracle_attr, cache_age_sec,
-        ),
+        "observability": observability,
         "mt5_errors": mt5_errors,
         "cached_age_sec": cache_age_sec,
     })
