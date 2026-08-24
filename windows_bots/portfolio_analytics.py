@@ -31,6 +31,11 @@ import MetaTrader5 as mt5
 BASE_DIR = os.path.dirname(__file__)
 NOT_AVAILABLE = "Not Available"
 
+
+def _env_int(name):
+    raw = os.environ.get(name)
+    return int(raw) if raw else None
+
 # Same account credentials already used read-only elsewhere in this
 # codebase (status_dashboard.py's own ACCOUNTS dict) -- duplicated here on
 # purpose so this module has zero import-time dependency on the dashboard
@@ -39,9 +44,9 @@ ACCOUNTS = {
     "BA": dict(path=r"C:\Program Files\MetaTrader 5\terminal64.exe",
                login=None, password=None, server=None),
     "EM": dict(path=r"C:\MT5_Portable_3\terminal64.exe",
-               login=<REDACTED_MT5_LOGIN_EM>, password="<REDACTED_MT5_PASSWORD_EM>", server="Exness-MT5Real35"),
+               login=_env_int("MT5_LOGIN_EM"), password=os.environ.get("MT5_PASSWORD_EM"), server="Exness-MT5Real35"),
     "EA": dict(path=r"C:\MT5_Portable_2\terminal64.exe",
-               login=<REDACTED_MT5_LOGIN_EA>, password="<REDACTED_MT5_PASSWORD_EA>", server="Exness-MT5Real33"),
+               login=_env_int("MT5_LOGIN_EA"), password=os.environ.get("MT5_PASSWORD_EA"), server="Exness-MT5Real33"),
 }
 
 # Magic -> bot display name. Kept in sync with status_dashboard.py's own
@@ -501,7 +506,7 @@ def risk_halt_detail(accounts):
         "threshold_pct": PORTFOLIO_RISK_THRESHOLD_PCT,
         "baseline": round(baseline, 2) if baseline is not None else None,
         "current_equity": current_total,
-        "next_reset": "daily rollover (~00:00 UTC)",
+        "next_reset": "daily rollover (01:00 Africa/Cairo)",
     }
 
 
@@ -535,7 +540,7 @@ def gold_btc_bot_eligibility(acc, equity, risk_halted):
         return "UNKNOWN"
 
 
-def asset_exposure_summary(accounts, assets=("XAU", "BTC", "ETH")):
+def asset_exposure_summary(accounts, assets=("XAU", "BTC", "ETH", "OIL")):
     """Read-only. For each named asset, aggregates across every symbol-name
     variant (XAUUSD/XAUUSD.s/XAUUSDm/XAU-USDT etc, substring-matched like
     classify() inside portfolio_risk_snapshot already does): position
