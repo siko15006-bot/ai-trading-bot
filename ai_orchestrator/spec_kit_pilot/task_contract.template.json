@@ -1,0 +1,22 @@
+{
+  "id": "sandbox-example",
+  "objective": "Describe one bounded ai_orchestrator change",
+  "classification": "CODE_CHANGE",
+  "allowed_paths": ["ai_orchestrator/test_workspace/", "ai_orchestrator/research/"],
+  "forbidden_paths": ["windows_bots/", "oracle_bots/", "production execution", "risk settings", "trade strategy thresholds"],
+  "acceptance_criteria": [
+    "deterministic self-test passes",
+    "diff remains inside allowed paths",
+    "no production-sensitive behavior changes"
+  ],
+  "review_policy": "deterministic-first; Claude only if high-risk, ambiguous, or explicitly review-required",
+  "expected_output": "unified diff plus concise validation result",
+  "metrics": {
+    "codex_calls": 0,
+    "claude_calls": 0,
+    "retries": 0,
+    "review_cycles": 0,
+    "out_of_scope_diff": false,
+    "scope_misunderstanding": false
+  }
+}
