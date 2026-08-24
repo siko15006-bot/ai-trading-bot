@@ -52,12 +52,20 @@ strategy/risk/threshold/lot/SL/TP changes.
 | --- | --- | ---: | --- | --- | --- |
 | gold_btc_momentum_shadow | NEED_MORE_DATA | 29 | running | WR 100%, PF inf, MAE 0, r_result 2.0 | SINGLE_REGIME / SUSPICIOUS_METRICS |
 | participation_pilot_btc_range | NEED_MORE_DATA | 2 | running | sample too small | live pilot; no strategy/risk edit |
-| manual_exit_shadow_tracker | NEED_MORE_DATA | 383 snapshots | running | verdict INCONCLUSIVE | eligible post-fix resolved rows = 0 |
-| pending_breakout_shadow | KEEP | 334 | running | MFE avg 0.5812, MAE avg 1.1414 | keep collecting |
+| manual_exit_shadow_tracker | NEED_MORE_DATA | 387 snapshots | running | verdict INCONCLUSIVE | eligible post-fix resolved rows = 0 |
+| pending_breakout_shadow | KEEP | 685 | running | MFE avg 0.6657, MAE avg 1.1123 | keep collecting |
 | pending_signal_shadow | NOT_READY | 1 trade row | stale upstream | timestamp/feed not proven | source dedup/stale |
-| ETH shadow-forward filter | KEEP | 297 | running | MFE avg 0.0172, MAE avg 0.0089 | keep collecting |
+| ETH shadow-forward filter | KEEP | 344 | running | MFE avg 0.0171, MAE avg 0.0092 | keep collecting |
 | generic_shadow_scoreboard | KEEP SHADOW | 6 | stale since 2026-08-23 | expectancy 0.14R | small/stale |
 | hypergold_scalp_shadow | NEED_MORE_DATA | 0 trades | running heartbeat | no closed sample | parser-specific scoring needed |
+
+Live bookkeeping fix:
+
+- Patched `C:\TradingBot\Bot_Active\orbit_shadow_scoreboard.py` only.
+- Backup: `C:\TradingBot\Bot_Active\Backups\orbit_shadow_scoreboard_final_closure_20260824_231835.py`.
+- `py_compile` passed.
+- Regenerated `C:\TradingBot\Bot_Active\orbit_shadow_scoreboard.json` at `2026-08-24T20:19:00Z`.
+- No trading bot, order path, strategy, or risk code changed.
 
 ## swing_pending_bybit
 
